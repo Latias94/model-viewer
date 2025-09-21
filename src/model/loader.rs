@@ -16,6 +16,10 @@ struct LoadedPbr {
     emissive_factor: [f32; 3],
     occlusion_strength: f32,
     ao_uv_index: u32,
+    base_uv_index: u32,
+    normal_uv_index: u32,
+    mr_uv_index: u32,
+    emissive_uv_index: u32,
 }
 
 impl ModelLoader {
@@ -246,6 +250,10 @@ impl ModelLoader {
                 metallic_factor: loaded.metallic_factor,
                 roughness_factor: loaded.roughness_factor,
                 ao_uv_index: loaded.ao_uv_index,
+                base_uv_index: loaded.base_uv_index,
+                normal_uv_index: loaded.normal_uv_index,
+                mr_uv_index: loaded.mr_uv_index,
+                emissive_uv_index: loaded.emissive_uv_index,
                 _pad: [0.0; 5],
             };
             let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -485,7 +493,11 @@ impl ModelLoader {
 
         let base_color = load_tex(asset_importer::material::TextureType::BaseColor, true)
             .or_else(|| load_tex(asset_importer::material::TextureType::Diffuse, true));
+        let base_info = material
+            .texture(asset_importer::material::TextureType::BaseColor, 0)
+            .or_else(|| material.texture(asset_importer::material::TextureType::Diffuse, 0));
         let normal = load_tex(asset_importer::material::TextureType::Normals, false);
+        let normal_info = material.texture(asset_importer::material::TextureType::Normals, 0);
         let metallic_roughness = load_tex(
             asset_importer::material::TextureType::GltfMetallicRoughness,
             false,
@@ -496,6 +508,9 @@ impl ModelLoader {
                 false,
             )
         });
+        let mr_info = material
+            .texture(asset_importer::material::TextureType::GltfMetallicRoughness, 0)
+            .or_else(|| material.texture(asset_importer::material::TextureType::DiffuseRoughness, 0));
         let occlusion_info =
             material.texture(asset_importer::material::TextureType::AmbientOcclusion, 0);
         let occlusion = load_tex(
@@ -504,6 +519,7 @@ impl ModelLoader {
         );
         let ao_uv_index = occlusion_info.map(|i| i.uv_index).unwrap_or(0);
         let emissive = load_tex(asset_importer::material::TextureType::Emissive, true);
+        let emissive_info = material.texture(asset_importer::material::TextureType::Emissive, 0);
 
         let metallic_factor = material.metallic_factor().unwrap_or(1.0);
         let roughness_factor = material.roughness_factor().unwrap_or(1.0);
@@ -511,6 +527,11 @@ impl ModelLoader {
         let base_color_factor = [1.0, 1.0, 1.0, 1.0];
         let emissive_factor = [0.0, 0.0, 0.0];
         let occlusion_strength = 1.0;
+
+        let base_uv_index = base_info.map(|i| i.uv_index).unwrap_or(0);
+        let normal_uv_index = normal_info.map(|i| i.uv_index).unwrap_or(0);
+        let mr_uv_index = mr_info.map(|i| i.uv_index).unwrap_or(0);
+        let emissive_uv_index = emissive_info.map(|i| i.uv_index).unwrap_or(0);
 
         Ok(LoadedPbr {
             base_color,
@@ -524,6 +545,10 @@ impl ModelLoader {
             emissive_factor,
             occlusion_strength,
             ao_uv_index,
+            base_uv_index,
+            normal_uv_index,
+            mr_uv_index,
+            emissive_uv_index,
         })
     }
 

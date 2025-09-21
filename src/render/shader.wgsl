@@ -79,6 +79,10 @@ struct MaterialParams {
     metallic_factor: f32,
     roughness_factor: f32,
     ao_uv_index: u32,
+    base_uv_index: u32,
+    normal_uv_index: u32,
+    mr_uv_index: u32,
+    emissive_uv_index: u32,
     _pad0: vec2<f32>,
 }
 
@@ -119,13 +123,21 @@ fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f
 
 @fragment
 fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
+    // Flip Y coordinate to fix texture orientation
+    let uv0 = vec2<f32>(input.tex_coords.x, 1.0 - input.tex_coords.y);
+    let uv1 = vec2<f32>(input.tex_coords1.x, 1.0 - input.tex_coords1.y);
+    let uv_base = select(uv0, uv1, material.base_uv_index == 1u);
+    let uv_norm = select(uv0, uv1, material.normal_uv_index == 1u);
+    let uv_mr = select(uv0, uv1, material.mr_uv_index == 1u);
+    let uv_em = select(uv0, uv1, material.emissive_uv_index == 1u);
+
     // Sample base color (sRGB -> linear handled by texture format)
-    let base_sample = textureSample(tex_base_color, samp_base_color, input.tex_coords);
+    let base_sample = textureSample(tex_base_color, samp_base_color, uv_base);
     let base = base_sample.rgb * material.base_color_factor.rgb;
     let alpha = base_sample.a * material.base_color_factor.a;
 
     // Metallic-Roughness (linear)
-    let mr = textureSample(tex_metal_rough, samp_metal_rough, input.tex_coords).rgb;
+    let mr = textureSample(tex_metal_rough, samp_metal_rough, uv_mr).rgb;
     let metallic = clamp(mr.b * material.metallic_factor, 0.0, 1.0);
     let roughness = clamp(mr.g * material.roughness_factor, 0.04, 1.0);
 
@@ -134,7 +146,7 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     let T = normalize(input.world_tangent);
     let B = normalize(cross(N, T) * input.tangent_sign);
     let tbn = mat3x3<f32>(T, B, N);
-    let nmap = textureSample(tex_normal, samp_normal, input.tex_coords).xyz * 2.0 - vec3<f32>(1.0, 1.0, 1.0);
+    let nmap = textureSample(tex_normal, samp_normal, uv_norm).xyz * 2.0 - vec3<f32>(1.0, 1.0, 1.0);
     let Nn = normalize(tbn * nmap);
 
     // Lighting vectors
@@ -173,7 +185,7 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     }
 
     // Emissive
-    let emissive = textureSample(tex_emissive, samp_emissive, input.tex_coords).rgb * material.emissive_factor;
+    let emissive = textureSample(tex_emissive, samp_emissive, uv_em).rgb * material.emissive_factor;
     color += emissive;
 
     // Alpha from base color a

@@ -58,6 +58,10 @@ pub struct MaterialParams {
     pub metallic_factor: f32,
     pub roughness_factor: f32,
     pub ao_uv_index: u32,
+    pub base_uv_index: u32,
+    pub normal_uv_index: u32,
+    pub mr_uv_index: u32,
+    pub emissive_uv_index: u32,
     pub _pad: [f32; 5],
 }
 
@@ -70,6 +74,10 @@ impl Default for MaterialParams {
             metallic_factor: 1.0,
             roughness_factor: 1.0,
             ao_uv_index: 0,
+            base_uv_index: 0,
+            normal_uv_index: 0,
+            mr_uv_index: 0,
+            emissive_uv_index: 0,
             _pad: [0.0; 5],
         }
     }
