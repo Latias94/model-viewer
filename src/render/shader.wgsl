@@ -5,6 +5,7 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) tex_coords: vec2<f32>,
     @location(3) tangent: vec4<f32>,
+    @location(4) tex_coords1: vec2<f32>,
 }
 
 struct VertexOutput {
@@ -14,6 +15,7 @@ struct VertexOutput {
     @location(2) tex_coords: vec2<f32>,
     @location(3) world_tangent: vec3<f32>,
     @location(4) tangent_sign: f32,
+    @location(5) tex_coords1: vec2<f32>,
 }
 
 struct Uniforms {
@@ -37,6 +39,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     out.world_normal = (uniforms.normal_matrix * vec4<f32>(input.normal, 0.0)).xyz;
 
     out.tex_coords = input.tex_coords;
+    out.tex_coords1 = input.tex_coords1;
 
     // Transform tangent to world space
     out.world_tangent = (uniforms.normal_matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz;
@@ -53,6 +56,7 @@ struct FragmentInput {
     @location(2) tex_coords: vec2<f32>,
     @location(3) world_tangent: vec3<f32>,
     @location(4) tangent_sign: f32,
+    @location(5) tex_coords1: vec2<f32>,
 }
 
 struct LightingData {
@@ -72,6 +76,7 @@ struct MaterialParams {
     occlusion_strength: f32,
     metallic_factor: f32,
     roughness_factor: f32,
+    ao_uv_index: u32,
     _pad0: vec2<f32>,
 }
 
@@ -153,7 +158,8 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     var color = (diffuse + specular) * radiance * NdotL;
 
     // Ambient + AO
-    let ao = textureSample(tex_occlusion, samp_occlusion, input.tex_coords).r * material.occlusion_strength;
+    let ao_uv = select(input.tex_coords, input.tex_coords1, material.ao_uv_index == 1u);
+    let ao = textureSample(tex_occlusion, samp_occlusion, ao_uv).r * material.occlusion_strength;
     let ambient = lighting.ambient_strength * base;
     color = ambient * ao + color * lighting.lighting_intensity;
 
@@ -161,7 +167,9 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     let emissive = textureSample(tex_emissive, samp_emissive, input.tex_coords).rgb * material.emissive_factor;
     color += emissive;
 
-    return vec4<f32>(color, 1.0);
+    // Alpha from base color a
+    let alpha = textureSample(tex_base_color, samp_base_color, input.tex_coords).a * material.base_color_factor.a;
+    return vec4<f32>(color, alpha);
 }
 
 // Simple fragment shader for models without textures

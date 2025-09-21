@@ -15,6 +15,7 @@ struct LoadedPbr {
     roughness_factor: f32,
     emissive_factor: [f32; 3],
     occlusion_strength: f32,
+    ao_uv_index: u32,
 }
 
 impl ModelLoader {
@@ -133,6 +134,7 @@ impl ModelLoader {
         let tex_coords = mesh.texture_coords(0).unwrap_or_default();
         let tangents = mesh.tangents().unwrap_or_default();
         let bitangents = mesh.bitangents().unwrap_or_default();
+        let tex_coords1 = mesh.texture_coords(1).unwrap_or_default();
 
         for i in 0..positions.len() {
             // Compute tangent with handedness (w)
@@ -166,6 +168,11 @@ impl ModelLoader {
                     [0.0, 0.0]
                 },
                 tangent: [tx, ty, tz, tw],
+                tex_coords1: if i < tex_coords1.len() {
+                    [tex_coords1[i].x, tex_coords1[i].y]
+                } else {
+                    [0.0, 0.0]
+                },
             };
             vertices.push(vertex);
         }
@@ -238,7 +245,8 @@ impl ModelLoader {
                 occlusion_strength: loaded.occlusion_strength,
                 metallic_factor: loaded.metallic_factor,
                 roughness_factor: loaded.roughness_factor,
-                _pad: [0.0; 2],
+                ao_uv_index: loaded.ao_uv_index,
+                _pad: [0.0; 5],
             };
             let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("material_params"),
@@ -419,6 +427,14 @@ impl ModelLoader {
             material_bind_group,
             material_params_buffer,
             world_transform,
+            // material flags
+            scene
+                .material(mesh.material_index())
+                .map(|m| m.is_two_sided())
+                .unwrap_or(false),
+            scene
+                .material(mesh.material_index())
+                .and_then(|m| m.blend_mode()),
         )
     }
 
@@ -480,10 +496,13 @@ impl ModelLoader {
                 false,
             )
         });
+        let occlusion_info =
+            material.texture(asset_importer::material::TextureType::AmbientOcclusion, 0);
         let occlusion = load_tex(
             asset_importer::material::TextureType::AmbientOcclusion,
             false,
         );
+        let ao_uv_index = occlusion_info.map(|i| i.uv_index).unwrap_or(0);
         let emissive = load_tex(asset_importer::material::TextureType::Emissive, true);
 
         let metallic_factor = material.metallic_factor().unwrap_or(1.0);
@@ -504,6 +523,7 @@ impl ModelLoader {
             roughness_factor,
             emissive_factor,
             occlusion_strength,
+            ao_uv_index,
         })
     }
 

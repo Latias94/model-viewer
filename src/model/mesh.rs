@@ -10,14 +10,16 @@ pub struct Vertex {
     pub normal: [f32; 3],
     pub tex_coords: [f32; 2],
     pub tangent: [f32; 4],
+    pub tex_coords1: [f32; 2],
 }
 
 impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+    const ATTRIBS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x3,
         2 => Float32x2,
-        3 => Float32x4
+        3 => Float32x4,
+        4 => Float32x2
     ];
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -38,6 +40,8 @@ pub struct Mesh {
     pub material_bind_group: Option<wgpu::BindGroup>,
     pub material_params_buffer: Option<wgpu::Buffer>,
     pub model_matrix: glam::Mat4,
+    pub two_sided: bool,
+    pub blend_mode: Option<asset_importer::material::BlendMode>,
 }
 
 impl Mesh {
@@ -50,6 +54,8 @@ impl Mesh {
         material_bind_group: Option<wgpu::BindGroup>,
         material_params_buffer: Option<wgpu::Buffer>,
         model_matrix: glam::Mat4,
+        two_sided: bool,
+        blend_mode: Option<asset_importer::material::BlendMode>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
@@ -72,6 +78,8 @@ impl Mesh {
             material_bind_group,
             material_params_buffer,
             model_matrix,
+            two_sided,
+            blend_mode,
         })
     }
 

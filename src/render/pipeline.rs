@@ -54,7 +54,8 @@ pub struct MaterialParams {
     pub occlusion_strength: f32,
     pub metallic_factor: f32,
     pub roughness_factor: f32,
-    pub _pad: [f32; 2],
+    pub ao_uv_index: u32,
+    pub _pad: [f32; 5],
 }
 
 impl Default for MaterialParams {
@@ -65,7 +66,8 @@ impl Default for MaterialParams {
             occlusion_strength: 1.0,
             metallic_factor: 1.0,
             roughness_factor: 1.0,
-            _pad: [0.0; 2],
+            ao_uv_index: 0,
+            _pad: [0.0; 5],
         }
     }
 }
@@ -87,6 +89,9 @@ impl Default for LightingData {
 
 pub struct ModelRenderPipeline {
     pub pipeline_solid: wgpu::RenderPipeline,
+    pub pipeline_solid_double: wgpu::RenderPipeline,
+    pub pipeline_alpha: wgpu::RenderPipeline,
+    pub pipeline_alpha_double: wgpu::RenderPipeline,
     pub pipeline_normals: wgpu::RenderPipeline,
     pub pipeline_wireframe: Option<wgpu::RenderPipeline>,
     pub uniform_buffer: wgpu::Buffer,
@@ -290,7 +295,10 @@ impl ModelRenderPipeline {
         });
 
         // Helper to create pipeline variants
-        let make_pipeline = |polygon_mode: wgpu::PolygonMode, fragment_entry: &str| {
+        let make_pipeline = |polygon_mode: wgpu::PolygonMode,
+                             fragment_entry: &str,
+                             cull: Option<wgpu::Face>,
+                             blend: Option<wgpu::BlendState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Model Render Pipeline"),
                 layout: Some(&pipeline_layout),
@@ -305,7 +313,7 @@ impl ModelRenderPipeline {
                     entry_point: Some(fragment_entry),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: config.format,
-                        blend: Some(wgpu::BlendState::REPLACE),
+                        blend,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -314,7 +322,7 @@ impl ModelRenderPipeline {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     strip_index_format: None,
                     front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: Some(wgpu::Face::Back),
+                    cull_mode: cull,
                     polygon_mode,
                     unclipped_depth: false,
                     conservative: false,
@@ -337,16 +345,47 @@ impl ModelRenderPipeline {
         };
 
         // Pipelines
-        let pipeline_solid = make_pipeline(wgpu::PolygonMode::Fill, "fs_main");
-        let pipeline_normals = make_pipeline(wgpu::PolygonMode::Fill, "fs_show_normals");
+        let opaque_blend = Some(wgpu::BlendState::REPLACE);
+        let alpha_blend = Some(wgpu::BlendState::ALPHA_BLENDING);
+
+        let pipeline_solid = make_pipeline(
+            wgpu::PolygonMode::Fill,
+            "fs_main",
+            Some(wgpu::Face::Back),
+            opaque_blend,
+        );
+        let pipeline_solid_double =
+            make_pipeline(wgpu::PolygonMode::Fill, "fs_main", None, opaque_blend);
+        let pipeline_alpha = make_pipeline(
+            wgpu::PolygonMode::Fill,
+            "fs_main",
+            Some(wgpu::Face::Back),
+            alpha_blend,
+        );
+        let pipeline_alpha_double =
+            make_pipeline(wgpu::PolygonMode::Fill, "fs_main", None, alpha_blend);
+        let pipeline_normals = make_pipeline(
+            wgpu::PolygonMode::Fill,
+            "fs_show_normals",
+            Some(wgpu::Face::Back),
+            opaque_blend,
+        );
         let pipeline_wireframe = if wireframe_supported {
-            Some(make_pipeline(wgpu::PolygonMode::Line, "fs_main"))
+            Some(make_pipeline(
+                wgpu::PolygonMode::Line,
+                "fs_main",
+                Some(wgpu::Face::Back),
+                opaque_blend,
+            ))
         } else {
             None
         };
 
         Self {
             pipeline_solid,
+            pipeline_solid_double,
+            pipeline_alpha,
+            pipeline_alpha_double,
             pipeline_normals,
             pipeline_wireframe,
             uniform_buffer,

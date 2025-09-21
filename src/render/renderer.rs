@@ -221,12 +221,12 @@ impl Renderer {
                 timestamp_writes: None,
             });
 
-            // Choose pipeline variant
-            let use_normals = ui.show_normals();
-            let use_wireframe = ui.show_wireframe() && self.wireframe_supported;
-            if use_normals {
+            // Default pipeline; will adjust per-mesh (normals/wireframe overrides per-frame)
+            let use_normals_global = ui.show_normals();
+            let use_wireframe_global = ui.show_wireframe() && self.wireframe_supported;
+            if use_normals_global {
                 render_pass.set_pipeline(&self.pipeline.pipeline_normals);
-            } else if use_wireframe {
+            } else if use_wireframe_global {
                 if let Some(wire) = &self.pipeline.pipeline_wireframe {
                     render_pass.set_pipeline(wire);
                 } else {
@@ -240,6 +240,26 @@ impl Renderer {
             // Render model with material if available
             if let Some(model) = &self.model {
                 for mesh in &model.meshes {
+                    // If not in normals/wireframe debug, choose material-specific pipeline
+                    if !use_normals_global && !use_wireframe_global {
+                        let alpha = matches!(
+                            mesh.blend_mode,
+                            Some(
+                                asset_importer::material::BlendMode::Default
+                                    | asset_importer::material::BlendMode::Additive
+                            )
+                        );
+                        let two = mesh.two_sided;
+                        if alpha && two {
+                            render_pass.set_pipeline(&self.pipeline.pipeline_alpha_double);
+                        } else if alpha {
+                            render_pass.set_pipeline(&self.pipeline.pipeline_alpha);
+                        } else if two {
+                            render_pass.set_pipeline(&self.pipeline.pipeline_solid_double);
+                        } else {
+                            render_pass.set_pipeline(&self.pipeline.pipeline_solid);
+                        }
+                    }
                     if let Some(bg) = &mesh.material_bind_group {
                         render_pass.set_bind_group(2, bg, &[]);
                     }
