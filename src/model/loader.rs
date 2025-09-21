@@ -72,6 +72,55 @@ impl ModelLoader {
             .await?;
         }
 
+        // Collect lights from scene (Assimp lights)
+        let mut lights: Vec<crate::model::LightInfo> = Vec::new();
+        for i in 0..scene.num_lights() {
+            if let Some(l) = scene.light(i) {
+                use asset_importer::light::LightType;
+                let kind = match l.light_type() {
+                    LightType::Directional => crate::model::LightKind::Directional,
+                    LightType::Point => crate::model::LightKind::Point,
+                    LightType::Spot => crate::model::LightKind::Spot,
+                    _ => crate::model::LightKind::Point,
+                };
+                let pos = l.position();
+                let dir = l.direction();
+                let col = l.color_diffuse();
+                let inner = l.angle_inner_cone();
+                let outer = l.angle_outer_cone();
+                let range = if l.attenuation_quadratic() > 0.0 {
+                    // Rough heuristic to map attenuation to a reasonable range
+                    (1.0 / l.attenuation_quadratic()).sqrt()
+                } else {
+                    -1.0
+                };
+                lights.push(crate::model::LightInfo {
+                    kind,
+                    position: [pos.x, pos.y, pos.z],
+                    direction: [dir.x, dir.y, dir.z],
+                    color: [col.x, col.y, col.z],
+                    intensity: 1.0,
+                    range,
+                    inner_cos: inner.cos(),
+                    outer_cos: outer.cos(),
+                });
+            }
+        }
+        // Fallback default light if none
+        if lights.is_empty() {
+            lights.push(crate::model::LightInfo {
+                kind: crate::model::LightKind::Directional,
+                position: [2.0, 2.0, 2.0],
+                direction: [-1.0, -1.0, -1.0],
+                color: [1.0, 1.0, 1.0],
+                intensity: 1.0,
+                range: -1.0,
+                inner_cos: 0.9,
+                outer_cos: 0.75,
+            });
+        }
+        model.lights = lights;
+
         log::info!(
             "Model processing complete. Total meshes: {}",
             model.meshes.len()

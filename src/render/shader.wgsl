@@ -63,12 +63,17 @@ struct FragmentInput {
     @location(6) color: vec4<f32>,
 }
 
+struct LightItem {
+    position: vec4<f32>,        // xyz + pad
+    color_kind: vec4<f32>,       // rgb + kind(as f32)
+    direction_range: vec4<f32>,  // xyz + range
+    params: vec4<f32>,           // intensity, inner_cos, outer_cos, pad
+}
+
 struct LightingData {
-    light_position: vec3<f32>,
-    light_color: vec3<f32>,
-    view_position: vec3<f32>,
-    ambient_strength: f32,
-    lighting_intensity: f32,
+    viewpos_ambient: vec4<f32>,  // view.xyz + ambient
+    counts_pad: vec4<f32>,       // x = light_count
+    lights: array<LightItem, 8>,
 }
 
 @group(1) @binding(0)
@@ -173,29 +178,48 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     nmap = vec3<f32>(nmap.x * material.normal_scale, nmap.y * material.normal_scale, nmap.z);
     let Nn = normalize(tbn * nmap);
 
-    // Lighting vectors
-    let V = normalize(lighting.view_position - input.world_position);
-    let L = normalize(lighting.light_position - input.world_position);
-    let H = normalize(V + L);
-
-    let NdotL = max(dot(Nn, L), 0.0);
-    let NdotV = max(dot(Nn, V), 0.0);
-
-    // Fresnel base reflectance
+    let V = normalize(lighting.viewpos_ambient.xyz - input.world_position);
+    var color = vec3<f32>(0.0, 0.0, 0.0);
     let F0 = mix(vec3<f32>(0.04, 0.04, 0.04), base, metallic);
-    let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
-    let D = distribution_ggx(Nn, H, roughness);
-    let G = geometry_smith(Nn, V, L, roughness);
-
-    let numerator = D * G * F;
-    let denom = 4.0 * NdotV * NdotL + 1e-5;
-    let specular = numerator / denom;
-
-    let kS = F;
-    let kD = (vec3<f32>(1.0, 1.0, 1.0) - kS) * (1.0 - metallic);
-    let diffuse = kD * base / 3.14159265;
-    let radiance = lighting.light_color;
-    var color = (diffuse + specular) * radiance * NdotL;
+    for (var i: u32 = 0u; i < u32(lighting.counts_pad.x); i = i + 1u) {
+        let Ld = lighting.lights[i];
+        var L = vec3<f32>(0.0, 0.0, 0.0);
+        var atten = 1.0;
+        if (Ld.color_kind.w == 0.0) {
+            // Directional: use -direction
+            L = normalize(-Ld.direction_range.xyz);
+            atten = 1.0;
+        } else {
+            // Point/Spot
+            let toL = Ld.position.xyz - input.world_position;
+            let dist = max(length(toL), 1e-5);
+            L = toL / dist;
+            // inverse-square attenuation with optional range
+            let r = Ld.direction_range.w;
+            let inv2 = 1.0 / (dist * dist + 1e-5);
+            atten = select(inv2, inv2 * smoothstep(0.0, 1.0, 1.0 - dist / max(r, 1e-5)), r < 0.0);
+            if (Ld.color_kind.w == 2.0) {
+                // spot cone falloff
+                let cd = dot(normalize(-Ld.direction_range.xyz), L);
+                let spot = clamp((cd - Ld.params.z) / max(Ld.params.y - Ld.params.z, 1e-5), 0.0, 1.0);
+                atten = atten * spot * spot;
+            }
+        }
+        let radiance = Ld.color_kind.xyz * (Ld.params.x * atten);
+        let H = normalize(V + L);
+        let NdotL = max(dot(Nn, L), 0.0);
+        let NdotV = max(dot(Nn, V), 0.0);
+        let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
+        let D = distribution_ggx(Nn, H, roughness);
+        let G = geometry_smith(Nn, V, L, roughness);
+        let numerator = D * G * F;
+        let denom = 4.0 * NdotV * NdotL + 1e-5;
+        let specular = numerator / denom;
+        let kS = F;
+        let kD = (vec3<f32>(1.0, 1.0, 1.0) - kS) * (1.0 - metallic);
+        let diffuse = kD * base / 3.14159265;
+        color += (diffuse + specular) * radiance * NdotL;
+    }
 
     // Ambient + AO
     let uv0_ao = (material.ao_uv_transform * vec4<f32>(uv0_raw.x, uv0_raw.y, 0.0, 1.0)).xy;
@@ -203,8 +227,8 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     let ao_uv0 = select(uv0_ao, uv1_ao, material.ao_uv_index == 1u);
     let ao_uv = vec2<f32>(ao_uv0.x, 1.0 - ao_uv0.y);
     let ao = textureSample(tex_occlusion, samp_occlusion, ao_uv).r * material.occlusion_strength;
-    let ambient = lighting.ambient_strength * base;
-    color = ambient * ao + color * lighting.lighting_intensity;
+    let ambient = lighting.viewpos_ambient.w * base;
+    color = ambient * ao + color;
 
     // Alpha mask (cutout)
     if (material.alpha_mode == 1u && alpha < material.alpha_cutoff) {
@@ -222,25 +246,39 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
 // Simple fragment shader for models without textures
 @fragment
 fn fs_main_simple(input: FragmentInput) -> @location(0) vec4<f32> {
-    let object_color = vec3<f32>(0.8, 0.6, 0.4); // Default orange color
-
-    // Ambient lighting
-    let ambient = lighting.ambient_strength * lighting.light_color;
-
-    // Diffuse lighting
+    let object_color = vec3<f32>(0.8, 0.6, 0.4);
     let norm = normalize(input.world_normal);
-    let light_dir = normalize(lighting.light_position - input.world_position);
-    let diff = max(dot(norm, light_dir), 0.0);
-    let diffuse = diff * lighting.light_color;
+    let V = normalize(lighting.viewpos_ambient.xyz - input.world_position);
 
-    // Specular lighting
-    let view_dir = normalize(lighting.view_position - input.world_position);
-    let reflect_dir = reflect(-light_dir, norm);
-    let spec = pow(max(dot(view_dir, reflect_dir), 0.0), 32.0);
-    let specular = 0.5 * spec * lighting.light_color;
-
-    let lit = (diffuse + specular) * lighting.lighting_intensity;
-    let result = (ambient + lit) * object_color;
+    var light_sum = vec3<f32>(0.0, 0.0, 0.0);
+    for (var i: u32 = 0u; i < u32(lighting.counts_pad.x); i = i + 1u) {
+        let Ld = lighting.lights[i];
+        var L = vec3<f32>(0.0, 0.0, 0.0);
+        var atten = 1.0;
+        if (Ld.color_kind.w == 0.0) {
+            L = normalize(-Ld.direction_range.xyz);
+            atten = 1.0;
+        } else {
+            let toL = Ld.position.xyz - input.world_position;
+            let dist = max(length(toL), 1e-5);
+            L = toL / dist;
+            let r = Ld.direction_range.w;
+            let inv2 = 1.0 / (dist * dist + 1e-5);
+            atten = select(inv2, inv2 * smoothstep(0.0, 1.0, 1.0 - dist / max(r, 1e-5)), r < 0.0);
+            if (Ld.color_kind.w == 2.0) {
+                let cd = dot(normalize(-Ld.direction_range.xyz), L);
+                let spot = clamp((cd - Ld.params.z) / max(Ld.params.y - Ld.params.z, 1e-5), 0.0, 1.0);
+                atten = atten * spot * spot;
+            }
+        }
+        let radiance = Ld.color_kind.xyz * (Ld.params.x * atten);
+        let diff = max(dot(norm, L), 0.0);
+        let H = normalize(V + L);
+        let spec = pow(max(dot(norm, H), 0.0), 32.0);
+        light_sum += (diff + 0.5 * spec) * radiance;
+    }
+    let ambient = lighting.viewpos_ambient.w * object_color;
+    let result = ambient + light_sum * object_color;
     return vec4<f32>(result, 1.0);
 }
 

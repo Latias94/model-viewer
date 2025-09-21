@@ -1,12 +1,35 @@
 use crate::{model::Mesh, model::ModelLoader};
 
+#[derive(Clone, Copy, Debug)]
+pub enum LightKind {
+    Directional = 0,
+    Point = 1,
+    Spot = 2,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LightInfo {
+    pub kind: LightKind,
+    pub position: [f32; 3],
+    pub direction: [f32; 3],
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub range: f32,
+    pub inner_cos: f32,
+    pub outer_cos: f32,
+}
+
 pub struct Model {
     pub meshes: Vec<Mesh>,
+    pub lights: Vec<LightInfo>,
 }
 
 impl Model {
     pub fn new() -> Self {
-        Self { meshes: Vec::new() }
+        Self {
+            meshes: Vec::new(),
+            lights: Vec::new(),
+        }
     }
 
     pub async fn load(

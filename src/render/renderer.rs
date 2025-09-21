@@ -164,12 +164,15 @@ impl Renderer {
         frame_time_ms: f32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Apply UI-driven uniforms
+        let scene_lights = self.model.as_ref().map(|m| m.lights.as_slice());
+
         self.pipeline.update_uniforms(
             camera,
             &self.config,
             &self.queue,
             ui.enable_lighting(),
             ui.light_intensity(),
+            scene_lights,
         );
 
         let output = match self.surface.get_current_texture() {

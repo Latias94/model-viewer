@@ -33,17 +33,23 @@ impl Uniforms {
     }
 }
 
+pub const MAX_LIGHTS: usize = 8;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct LightItemStd140 {
+    pub position: [f32; 4],        // xyz + pad
+    pub color_kind: [f32; 4],      // rgb + kind(as f32)
+    pub direction_range: [f32; 4], // xyz + range
+    pub params: [f32; 4],          // intensity, inner_cos, outer_cos, pad
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct LightingData {
-    pub light_position: [f32; 3],
-    pub _padding1: f32,
-    pub light_color: [f32; 3],
-    pub _padding2: f32,
-    pub view_position: [f32; 3],
-    pub ambient_strength: f32,
-    pub lighting_intensity: f32,
-    pub _padding3: [f32; 3],
+    pub viewpos_ambient: [f32; 4], // view.xyz + ambient
+    pub counts_pad: [f32; 4],      // light_count in x, others pad
+    pub lights: [LightItemStd140; MAX_LIGHTS],
 }
 
 #[repr(C)]
@@ -101,14 +107,14 @@ impl Default for MaterialParams {
 impl Default for LightingData {
     fn default() -> Self {
         Self {
-            light_position: [2.0, 2.0, 2.0],
-            _padding1: 0.0,
-            light_color: [1.0, 1.0, 1.0],
-            _padding2: 0.0,
-            view_position: [0.0, 0.0, 3.0],
-            ambient_strength: 0.3,
-            lighting_intensity: 1.0,
-            _padding3: [0.0; 3],
+            viewpos_ambient: [0.0, 0.0, 3.0, 0.3],
+            counts_pad: [0.0, 0.0, 0.0, 0.0],
+            lights: [LightItemStd140 {
+                position: [0.0, 0.0, 0.0, 0.0],
+                color_kind: [1.0, 1.0, 1.0, 0.0],
+                direction_range: [0.0, -1.0, 0.0, -1.0],
+                params: [1.0, 0.9, 0.75, 0.0],
+            }; MAX_LIGHTS],
         }
     }
 }
@@ -431,16 +437,37 @@ impl ModelRenderPipeline {
         queue: &wgpu::Queue,
         lighting_enabled: bool,
         light_intensity: f32,
+        scene_lights: Option<&[crate::model::LightInfo]>,
     ) {
         self.uniforms.update_view_proj(camera, config);
-        self.lighting_data.view_position = camera.position.to_array();
+        self.lighting_data.viewpos_ambient = [
+            camera.position.x,
+            camera.position.y,
+            camera.position.z,
+            if lighting_enabled { 0.3 } else { 1.0 },
+        ];
+
+        // Fill lights
+        let mut count = 0usize;
         if lighting_enabled {
-            self.lighting_data.ambient_strength = 0.3;
-            self.lighting_data.lighting_intensity = light_intensity;
-        } else {
-            self.lighting_data.ambient_strength = 1.0;
-            self.lighting_data.lighting_intensity = 0.0;
+            if let Some(lights) = scene_lights {
+                for l in lights.iter().take(MAX_LIGHTS) {
+                    let kind_f = match l.kind {
+                        crate::model::LightKind::Directional => 0.0,
+                        crate::model::LightKind::Point => 1.0,
+                        crate::model::LightKind::Spot => 2.0,
+                    };
+                    self.lighting_data.lights[count] = LightItemStd140 {
+                        position: [l.position[0], l.position[1], l.position[2], 0.0],
+                        color_kind: [l.color[0], l.color[1], l.color[2], kind_f],
+                        direction_range: [l.direction[0], l.direction[1], l.direction[2], l.range],
+                        params: [l.intensity * light_intensity, l.inner_cos, l.outer_cos, 0.0],
+                    };
+                    count += 1;
+                }
+            }
         }
+        self.lighting_data.counts_pad[0] = count as f32;
 
         queue.write_buffer(
             &self.uniform_buffer,

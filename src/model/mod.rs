@@ -4,4 +4,4 @@ pub mod model;
 
 pub use loader::ModelLoader;
 pub use mesh::{Mesh, Vertex};
-pub use model::Model;
+pub use model::{LightInfo, LightKind, Model};
