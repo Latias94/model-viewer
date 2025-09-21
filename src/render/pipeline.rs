@@ -46,6 +46,30 @@ pub struct LightingData {
     pub _padding3: [f32; 3],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct MaterialParams {
+    pub base_color_factor: [f32; 4],
+    pub emissive_factor: [f32; 3],
+    pub occlusion_strength: f32,
+    pub metallic_factor: f32,
+    pub roughness_factor: f32,
+    pub _pad: [f32; 2],
+}
+
+impl Default for MaterialParams {
+    fn default() -> Self {
+        Self {
+            base_color_factor: [1.0, 1.0, 1.0, 1.0],
+            emissive_factor: [0.0, 0.0, 0.0],
+            occlusion_strength: 1.0,
+            metallic_factor: 1.0,
+            roughness_factor: 1.0,
+            _pad: [0.0; 2],
+        }
+    }
+}
+
 impl Default for LightingData {
     fn default() -> Self {
         Self {
@@ -69,8 +93,7 @@ pub struct ModelRenderPipeline {
     pub lighting_buffer: wgpu::Buffer,
     pub uniform_bind_group: wgpu::BindGroup,
     pub lighting_bind_group: wgpu::BindGroup,
-    pub texture_bind_group_layout: wgpu::BindGroupLayout,
-    pub default_texture_bind_group: wgpu::BindGroup,
+    pub material_bind_group_layout: wgpu::BindGroupLayout,
     pub uniforms: Uniforms,
     pub lighting_data: LightingData,
 }
@@ -133,10 +156,11 @@ impl ModelRenderPipeline {
                 }],
             });
 
-        let texture_bind_group_layout =
+        let material_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("texture_bind_group_layout"),
+                label: Some("material_bind_group_layout"),
                 entries: &[
+                    // baseColor texture + sampler
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -151,6 +175,85 @@ impl ModelRenderPipeline {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // normal texture + sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // metallic-roughness texture + sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // occlusion texture + sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // emissive texture + sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // material params uniform
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 10,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
                         count: None,
                     },
                 ],
@@ -181,7 +284,7 @@ impl ModelRenderPipeline {
             bind_group_layouts: &[
                 &uniform_bind_group_layout,
                 &lighting_bind_group_layout,
-                &texture_bind_group_layout,
+                &material_bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
@@ -242,23 +345,6 @@ impl ModelRenderPipeline {
             None
         };
 
-        // Create a default white texture for models without textures
-        let default_texture = Self::create_default_texture(device, &queue);
-        let default_texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("default_texture_bind_group"),
-            layout: &texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&default_texture.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&default_texture.sampler),
-                },
-            ],
-        });
-
         Self {
             pipeline_solid,
             pipeline_normals,
@@ -267,8 +353,7 @@ impl ModelRenderPipeline {
             lighting_buffer,
             uniform_bind_group,
             lighting_bind_group,
-            texture_bind_group_layout,
-            default_texture_bind_group,
+            material_bind_group_layout,
             uniforms,
             lighting_data,
         }

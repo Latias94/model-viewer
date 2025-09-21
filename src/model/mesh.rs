@@ -9,13 +9,15 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub tex_coords: [f32; 2],
+    pub tangent: [f32; 4],
 }
 
 impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
+    const ATTRIBS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x3,
-        2 => Float32x2
+        2 => Float32x2,
+        3 => Float32x4
     ];
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -33,16 +35,21 @@ pub struct Mesh {
     pub textures: Vec<Texture>,
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
-    pub texture_bind_group: Option<wgpu::BindGroup>,
+    pub material_bind_group: Option<wgpu::BindGroup>,
+    pub material_params_buffer: Option<wgpu::Buffer>,
+    pub model_matrix: glam::Mat4,
 }
 
 impl Mesh {
     pub fn new(
         device: &wgpu::Device,
-        texture_bind_group_layout: &wgpu::BindGroupLayout,
+        _material_bind_group_layout: &wgpu::BindGroupLayout,
         vertices: Vec<Vertex>,
         indices: Vec<u32>,
         textures: Vec<Texture>,
+        material_bind_group: Option<wgpu::BindGroup>,
+        material_params_buffer: Option<wgpu::Buffer>,
+        model_matrix: glam::Mat4,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
@@ -56,33 +63,15 @@ impl Mesh {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        // Create an optional texture bind group using the first texture if available
-        let texture_bind_group = if let Some(tex) = textures.get(0) {
-            Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("mesh_texture_bind_group"),
-                layout: texture_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&tex.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&tex.sampler),
-                    },
-                ],
-            }))
-        } else {
-            None
-        };
-
         Ok(Self {
             vertices,
             indices,
             textures,
             vertex_buffer,
             index_buffer,
-            texture_bind_group,
+            material_bind_group,
+            material_params_buffer,
+            model_matrix,
         })
     }
 

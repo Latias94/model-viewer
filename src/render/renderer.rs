@@ -114,7 +114,7 @@ impl Renderer {
 
         // Load model if path is provided
         let model = if let Some(path) = model_path {
-            Some(Model::load(&device, &queue, &path, &pipeline.texture_bind_group_layout).await?)
+            Some(Model::load(&device, &queue, &path, &pipeline.material_bind_group_layout).await?)
         } else {
             None
         };
@@ -237,18 +237,26 @@ impl Renderer {
             }
             render_pass.set_bind_group(0, &self.pipeline.uniform_bind_group, &[]);
             render_pass.set_bind_group(1, &self.pipeline.lighting_bind_group, &[]);
-            // Render model with texture if available
+            // Render model with material if available
             if let Some(model) = &self.model {
                 for mesh in &model.meshes {
-                    if let Some(bg) = &mesh.texture_bind_group {
+                    if let Some(bg) = &mesh.material_bind_group {
                         render_pass.set_bind_group(2, bg, &[]);
-                    } else {
-                        render_pass.set_bind_group(
-                            2,
-                            &self.pipeline.default_texture_bind_group,
-                            &[],
-                        );
                     }
+                    // Update per-mesh model matrix
+                    let model_mat = mesh.model_matrix;
+                    let normal_mat = glam::Mat4::from_mat3(
+                        glam::Mat3::from_mat4(model_mat).inverse().transpose(),
+                    );
+                    // update uniforms' model and normal_matrix
+                    let mut uniforms = self.pipeline.uniforms;
+                    uniforms.model = model_mat.to_cols_array_2d();
+                    uniforms.normal_matrix = normal_mat.to_cols_array_2d();
+                    self.queue.write_buffer(
+                        &self.pipeline.uniform_buffer,
+                        0,
+                        bytemuck::cast_slice(&[uniforms]),
+                    );
                     mesh.render(&mut render_pass);
                 }
             }
@@ -286,7 +294,7 @@ impl Renderer {
             &self.device,
             &self.queue,
             path,
-            &self.pipeline.texture_bind_group_layout,
+            &self.pipeline.material_bind_group_layout,
         ))?;
         self.model = Some(model);
         Ok(())
