@@ -21,7 +21,12 @@ pub struct App {
     pub first_mouse: bool,
     pub last_mouse_pos: (f64, f64),
     pub rotating: bool,
+    pub panning: bool,
     pub initial_size: (u32, u32),
+    pub fps: f32,
+    pub frame_time_ms: f32,
+    pub orbit_target: glam::Vec3,
+    pub orbit_radius: f32,
 }
 
 impl App {
@@ -42,7 +47,12 @@ impl App {
             first_mouse: true,
             last_mouse_pos: (400.0, 300.0),
             rotating: false,
+            panning: false,
             initial_size,
+            fps: 0.0,
+            frame_time_ms: 0.0,
+            orbit_target: glam::Vec3::ZERO,
+            orbit_radius: 5.0,
         }
     }
 
@@ -93,12 +103,33 @@ impl App {
         let delta_time = current_frame.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = current_frame;
 
+        // Smooth metrics (EMA)
+        let alpha = 0.1f32;
+        if delta_time.is_finite() && delta_time > 0.00001 {
+            let inst_fps = 1.0 / delta_time;
+            let inst_ms = delta_time * 1000.0;
+            if self.fps == 0.0 {
+                self.fps = inst_fps;
+                self.frame_time_ms = inst_ms;
+            } else {
+                self.fps = self.fps * (1.0 - alpha) + inst_fps * alpha;
+                self.frame_time_ms = self.frame_time_ms * (1.0 - alpha) + inst_ms * alpha;
+            }
+        }
+
         self.process_input(delta_time);
 
         if let (Some(renderer), Some(ui), Some(window)) =
             (&mut self.renderer, &mut self.ui, &self.window)
         {
-            renderer.render(&self.camera, ui, window)?;
+            renderer.render(
+                &self.camera,
+                ui,
+                window,
+                delta_time,
+                self.fps,
+                self.frame_time_ms,
+            )?;
         }
 
         Ok(())
@@ -128,7 +159,13 @@ impl ApplicationHandler for App {
                 b: 0.125,
                 a: 1.0,
             });
-            let ui = Ui::new(&window, &renderer);
+            // Determine initial file dialog directory
+            let initial_dir = if let Some(path) = &self.model_path {
+                std::path::Path::new(path).parent().map(|p| p.to_path_buf())
+            } else {
+                std::env::current_dir().ok()
+            };
+            let ui = Ui::new(&window, &renderer, initial_dir);
 
             self.renderer = Some(renderer);
             self.ui = Some(ui);
@@ -203,6 +240,18 @@ impl ApplicationHandler for App {
                 if button == winit::event::MouseButton::Right {
                     self.rotating = state == ElementState::Pressed;
                     self.first_mouse = true;
+                    if let Some(window) = &self.window {
+                        let _ = window.set_cursor_grab(if self.rotating {
+                            winit::window::CursorGrabMode::Locked
+                        } else {
+                            winit::window::CursorGrabMode::None
+                        });
+                        window.set_cursor_visible(!self.rotating);
+                    }
+                }
+                if button == winit::event::MouseButton::Middle {
+                    self.panning = state == ElementState::Pressed;
+                    self.first_mouse = true;
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -220,9 +269,19 @@ impl ApplicationHandler for App {
                 self.last_mouse_pos = (x, y);
 
                 // Only handle camera movement if UI doesn't want the event
+                let orbit_mode = if let Some(ui) = &self.ui {
+                    ui.orbit_mode()
+                } else {
+                    false
+                };
                 if !ui_wants_event && self.rotating {
                     self.camera
                         .process_mouse_movement(xoffset as f32, yoffset as f32, true);
+                    if orbit_mode {
+                        // position is target - front * radius
+                        self.camera.position =
+                            self.orbit_target - self.camera.front * self.orbit_radius;
+                    }
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();
@@ -231,12 +290,32 @@ impl ApplicationHandler for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 // Only handle camera zoom if UI doesn't want the event
                 if !ui_wants_event {
+                    let orbit_mode = if let Some(ui) = &self.ui {
+                        ui.orbit_mode()
+                    } else {
+                        false
+                    };
                     match delta {
                         winit::event::MouseScrollDelta::LineDelta(_, y) => {
-                            self.camera.process_mouse_scroll(y);
+                            if orbit_mode {
+                                self.orbit_radius =
+                                    (self.orbit_radius - y * 0.25).clamp(0.2, 200.0);
+                                self.camera.position =
+                                    self.orbit_target - self.camera.front * self.orbit_radius;
+                            } else {
+                                self.camera.process_mouse_scroll(y);
+                            }
                         }
                         winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                            self.camera.process_mouse_scroll(pos.y as f32 / 50.0);
+                            let y = pos.y as f32 / 50.0;
+                            if orbit_mode {
+                                self.orbit_radius =
+                                    (self.orbit_radius - y * 0.25).clamp(0.2, 200.0);
+                                self.camera.position =
+                                    self.orbit_target - self.camera.front * self.orbit_radius;
+                            } else {
+                                self.camera.process_mouse_scroll(y);
+                            }
                         }
                     }
                 }
@@ -252,10 +331,43 @@ impl ApplicationHandler for App {
         &mut self,
         _event_loop: &ActiveEventLoop,
         _device_id: DeviceId,
-        _event: DeviceEvent,
+        event: DeviceEvent,
     ) {
-        // Handle device events if needed
+        // Use high-frequency raw mouse motion when rotating
+        if let DeviceEvent::MouseMotion { delta } = event {
+            let (dx, dy) = (delta.0 as f32, delta.1 as f32);
+            let orbit_mode = if let Some(ui) = &self.ui {
+                ui.orbit_mode()
+            } else {
+                false
+            };
+            if self.rotating {
+                self.camera.process_mouse_movement(dx, -dy, true);
+                if orbit_mode {
+                    self.camera.position =
+                        self.orbit_target - self.camera.front * self.orbit_radius;
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            } else if self.panning {
+                // Pan: translate along camera right/up
+                let pan_sensitivity = 0.005;
+                let delta_right = -dx * pan_sensitivity;
+                let delta_up = dy * pan_sensitivity;
+                let offset = self.camera.right * delta_right + self.camera.up * delta_up;
+                if orbit_mode {
+                    self.orbit_target += offset;
+                }
+                self.camera.position += offset;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+        }
     }
+
+    // removed duplicate stub device_event
 }
 
 fn parse_hex_color(hex: &str) -> Option<wgpu::Color> {

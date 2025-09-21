@@ -46,6 +46,14 @@ impl Renderer {
             Ok(adapter) => adapter,
             Err(e) => return Err(format!("Failed to find an appropriate adapter: {:?}", e).into()),
         };
+        let info = adapter.get_info();
+        log::info!(
+            "Adapter: {} ({:?}, {:?}), Driver: {}",
+            info.name,
+            info.backend,
+            info.device_type,
+            info.driver
+        );
 
         // Select features
         let adapter_features = adapter.features();
@@ -75,12 +83,22 @@ impl Renderer {
             .copied()
             .unwrap_or(surface_caps.formats[0]);
 
+        // Prefer vsync to avoid stutter/tearing
+        let present_mode = surface_caps
+            .present_modes
+            .iter()
+            .copied()
+            .find(|m| *m == wgpu::PresentMode::Fifo)
+            .unwrap_or(surface_caps.present_modes[0]);
+
+        log::info!("Present mode: {:?}", present_mode);
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: surface_caps.present_modes[0],
+            present_mode,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -141,6 +159,9 @@ impl Renderer {
         camera: &Camera,
         ui: &mut Ui,
         window: &Window,
+        delta_time: f32,
+        fps: f32,
+        frame_time_ms: f32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Apply UI-driven uniforms
         self.pipeline.update_uniforms(
@@ -151,7 +172,21 @@ impl Renderer {
             ui.light_intensity(),
         );
 
-        let output = self.surface.get_current_texture()?;
+        let output = match self.surface.get_current_texture() {
+            Ok(frame) => frame,
+            Err(err) => {
+                match err {
+                    wgpu::SurfaceError::Lost => {
+                        // Reconfigure and retry next frame
+                        self.surface.configure(&self.device, &self.config);
+                        return Ok(());
+                    }
+                    wgpu::SurfaceError::OutOfMemory => return Err("Out of memory".into()),
+                    wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Timeout => return Ok(()),
+                    wgpu::SurfaceError::Other => return Ok(()),
+                }
+            }
+        };
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -228,6 +263,9 @@ impl Renderer {
             &self.queue,
             self.model.as_ref(),
             camera,
+            delta_time,
+            fps,
+            frame_time_ms,
         )?;
         if let Some(path) = ui.take_pending_open_path() {
             log::info!("Loading model from UI: {}", path);

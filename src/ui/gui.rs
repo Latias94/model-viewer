@@ -15,10 +15,16 @@ pub struct Ui {
     light_intensity: f32,
     show_performance: bool,
     pending_open_path: Option<String>,
+    orbit_mode: bool,
+    last_open_dir: Option<std::path::PathBuf>,
 }
 
 impl Ui {
-    pub fn new(window: &Window, renderer: &Renderer) -> Self {
+    pub fn new(
+        window: &Window,
+        renderer: &Renderer,
+        initial_dir: Option<std::path::PathBuf>,
+    ) -> Self {
         let context = egui::Context::default();
 
         let egui_state = egui_winit::State::new(
@@ -43,6 +49,8 @@ impl Ui {
             light_intensity: 1.0,
             show_performance: false,
             pending_open_path: None,
+            orbit_mode: false,
+            last_open_dir: initial_dir,
         }
     }
 
@@ -60,6 +68,9 @@ impl Ui {
         queue: &wgpu::Queue,
         model: Option<&Model>,
         camera: &Camera,
+        delta_time: f32,
+        fps: f32,
+        frame_time_ms: f32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let raw_input = self.state.take_egui_input(window);
 
@@ -124,17 +135,25 @@ impl Ui {
                             ui.label(format!("Pitch: {:.1}°", camera.pitch.to_degrees()));
                             ui.label(format!("Zoom: {:.1}°", camera.zoom));
                             ui.label(format!("Speed: {:.1}", camera.movement_speed));
+                            ui.separator();
+                            ui.checkbox(&mut self.orbit_mode, "Orbit camera");
                         });
 
                     ui.separator();
                     if ui.button("Load Model").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("3D Models", &["gltf", "glb", "obj", "fbx", "dae"])
-                            .set_directory("assets")
-                            .pick_file()
-                        {
+                        let mut dlg = rfd::FileDialog::new()
+                            .add_filter("3D Models", &["gltf", "glb", "obj", "fbx", "dae"]);
+                        if let Some(dir) = &self.last_open_dir {
+                            dlg = dlg.set_directory(dir);
+                        } else if let Ok(cwd) = std::env::current_dir() {
+                            dlg = dlg.set_directory(cwd);
+                        }
+                        if let Some(path) = dlg.pick_file() {
                             if let Some(p) = path.to_str() {
                                 open_path = Some(p.to_string());
+                            }
+                            if let Some(parent) = path.parent() {
+                                self.last_open_dir = Some(parent.to_path_buf());
                             }
                         }
                     }
@@ -150,9 +169,9 @@ impl Ui {
                 egui::Window::new("Performance")
                     .default_width(200.0)
                     .show(ctx, |ui| {
-                        ui.label("FPS: ~60.0");
-                        ui.label("Frame time: ~16.67ms");
-                        ui.label("Draw calls: 1");
+                        ui.label(format!("FPS: {:.1}", fps));
+                        ui.label(format!("Frame time: {:.2} ms", frame_time_ms));
+                        ui.label(format!("Delta time: {:.4} s", delta_time));
                     });
             }
         });
@@ -229,5 +248,9 @@ impl Ui {
 
     pub fn take_pending_open_path(&mut self) -> Option<String> {
         self.pending_open_path.take()
+    }
+
+    pub fn orbit_mode(&self) -> bool {
+        self.orbit_mode
     }
 }
