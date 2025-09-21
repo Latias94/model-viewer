@@ -20,6 +20,14 @@ struct LoadedPbr {
     normal_uv_index: u32,
     mr_uv_index: u32,
     emissive_uv_index: u32,
+    base_uv_transform: glam::Mat4,
+    normal_uv_transform: glam::Mat4,
+    mr_uv_transform: glam::Mat4,
+    emissive_uv_transform: glam::Mat4,
+    ao_uv_transform: glam::Mat4,
+    normal_scale: f32,
+    alpha_mode: u32,
+    alpha_cutoff: f32,
 }
 
 impl ModelLoader {
@@ -177,6 +185,15 @@ impl ModelLoader {
                 } else {
                     [0.0, 0.0]
                 },
+                color: if let Some(cols) = mesh.vertex_colors(0) {
+                    if i < cols.len() {
+                        [cols[i].x, cols[i].y, cols[i].z, cols[i].w]
+                    } else {
+                        [1.0, 1.0, 1.0, 1.0]
+                    }
+                } else {
+                    [1.0, 1.0, 1.0, 1.0]
+                },
             };
             vertices.push(vertex);
         }
@@ -254,7 +271,16 @@ impl ModelLoader {
                 normal_uv_index: loaded.normal_uv_index,
                 mr_uv_index: loaded.mr_uv_index,
                 emissive_uv_index: loaded.emissive_uv_index,
-                _pad: [0.0; 5],
+                normal_scale: loaded.normal_scale,
+                alpha_cutoff: loaded.alpha_cutoff,
+                alpha_mode: loaded.alpha_mode,
+                _pad0: 0,
+                _pad1: 0,
+                base_uv_transform: loaded.base_uv_transform.to_cols_array_2d(),
+                normal_uv_transform: loaded.normal_uv_transform.to_cols_array_2d(),
+                mr_uv_transform: loaded.mr_uv_transform.to_cols_array_2d(),
+                emissive_uv_transform: loaded.emissive_uv_transform.to_cols_array_2d(),
+                ao_uv_transform: loaded.ao_uv_transform.to_cols_array_2d(),
             };
             let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("material_params"),
@@ -452,10 +478,35 @@ impl ModelLoader {
         material: &asset_importer::material::Material,
         base_path: &str,
     ) -> Result<LoadedPbr, Box<dyn std::error::Error>> {
-        // helper to resolve path and load with correct sRGB setting
+        // helper: map modes and transforms and create textures with custom samplers
+        fn map_mode(m: asset_importer::material::TextureMapMode) -> wgpu::AddressMode {
+            use asset_importer::material::TextureMapMode as M;
+            match m {
+                M::Wrap => wgpu::AddressMode::Repeat,
+                M::Clamp => wgpu::AddressMode::ClampToEdge,
+                M::Mirror => wgpu::AddressMode::MirrorRepeat,
+                M::Decal => wgpu::AddressMode::ClampToEdge,
+                _ => wgpu::AddressMode::Repeat,
+            }
+        }
+        fn uv_transform_to_mat4(tr: &Option<asset_importer::material::UVTransform>) -> glam::Mat4 {
+            if let Some(t) = tr {
+                let trans =
+                    glam::Mat4::from_translation(glam::vec3(t.translation.x, t.translation.y, 0.0));
+                let rot = glam::Mat4::from_rotation_z(t.rotation);
+                let scale = glam::Mat4::from_scale(glam::vec3(t.scaling.x, t.scaling.y, 1.0));
+                trans * rot * scale
+            } else {
+                glam::Mat4::IDENTITY
+            }
+        }
+
         let load_tex = |ty: asset_importer::material::TextureType,
                         srgb: bool|
-         -> Option<crate::render::Texture> {
+         -> Option<(
+            crate::render::Texture,
+            asset_importer::material::TextureInfo,
+        )> {
             let count = material.texture_count(ty);
             if count == 0 {
                 return None;
@@ -471,19 +522,28 @@ impl ModelLoader {
                 base_dir.join(&texture_path).to_string_lossy().to_string()
             };
             match image::open(&full_path) {
-                Ok(img) => match crate::render::Texture::from_image_with_format(
-                    device,
-                    queue,
-                    &img,
-                    Some(&format!("texture_{}", full_path)),
-                    srgb,
-                ) {
-                    Ok(t) => Some(t),
-                    Err(e) => {
-                        log::warn!("Failed to create texture {}: {}", full_path, e);
-                        None
+                Ok(img) => {
+                    let params = crate::render::texture::TextureSamplerParams {
+                        address_mode_u: map_mode(info.map_modes[0]),
+                        address_mode_v: map_mode(info.map_modes[1]),
+                        address_mode_w: wgpu::AddressMode::Repeat,
+                        ..Default::default()
+                    };
+                    match crate::render::Texture::from_image_with_format_and_sampler_params(
+                        device,
+                        queue,
+                        &img,
+                        Some(&format!("texture_{}", full_path)),
+                        srgb,
+                        &params,
+                    ) {
+                        Ok(tex) => Some((tex, info)),
+                        Err(e) => {
+                            log::warn!("Failed to create texture {}: {}", full_path, e);
+                            None
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     log::warn!("Failed to load texture {}: {}", full_path, e);
                     None
@@ -491,14 +551,10 @@ impl ModelLoader {
             }
         };
 
-        let base_color = load_tex(asset_importer::material::TextureType::BaseColor, true)
+        let base_loaded = load_tex(asset_importer::material::TextureType::BaseColor, true)
             .or_else(|| load_tex(asset_importer::material::TextureType::Diffuse, true));
-        let base_info = material
-            .texture(asset_importer::material::TextureType::BaseColor, 0)
-            .or_else(|| material.texture(asset_importer::material::TextureType::Diffuse, 0));
-        let normal = load_tex(asset_importer::material::TextureType::Normals, false);
-        let normal_info = material.texture(asset_importer::material::TextureType::Normals, 0);
-        let metallic_roughness = load_tex(
+        let normal_loaded = load_tex(asset_importer::material::TextureType::Normals, false);
+        let mr_loaded = load_tex(
             asset_importer::material::TextureType::GltfMetallicRoughness,
             false,
         )
@@ -508,30 +564,95 @@ impl ModelLoader {
                 false,
             )
         });
-        let mr_info = material
-            .texture(asset_importer::material::TextureType::GltfMetallicRoughness, 0)
-            .or_else(|| material.texture(asset_importer::material::TextureType::DiffuseRoughness, 0));
-        let occlusion_info =
-            material.texture(asset_importer::material::TextureType::AmbientOcclusion, 0);
-        let occlusion = load_tex(
+        let occlusion_loaded = load_tex(
             asset_importer::material::TextureType::AmbientOcclusion,
             false,
         );
-        let ao_uv_index = occlusion_info.map(|i| i.uv_index).unwrap_or(0);
-        let emissive = load_tex(asset_importer::material::TextureType::Emissive, true);
-        let emissive_info = material.texture(asset_importer::material::TextureType::Emissive, 0);
+        let emissive_loaded = load_tex(asset_importer::material::TextureType::Emissive, true);
+
+        let (base_color, base_info) = match base_loaded {
+            Some((t, i)) => (Some(t), Some(i)),
+            None => (None, None),
+        };
+        let (normal, normal_info) = match normal_loaded {
+            Some((t, i)) => (Some(t), Some(i)),
+            None => (None, None),
+        };
+        let (metallic_roughness, mr_info) = match mr_loaded {
+            Some((t, i)) => (Some(t), Some(i)),
+            None => (None, None),
+        };
+        let (occlusion, occlusion_info) = match occlusion_loaded {
+            Some((t, i)) => (Some(t), Some(i)),
+            None => (None, None),
+        };
+        let (emissive, emissive_info) = match emissive_loaded {
+            Some((t, i)) => (Some(t), Some(i)),
+            None => (None, None),
+        };
 
         let metallic_factor = material.metallic_factor().unwrap_or(1.0);
         let roughness_factor = material.roughness_factor().unwrap_or(1.0);
-        // base_color_factor & emissive_factor accessors not found; default values
-        let base_color_factor = [1.0, 1.0, 1.0, 1.0];
-        let emissive_factor = [0.0, 0.0, 0.0];
+        let base_color_factor = material
+            .base_color()
+            .map(|c| [c.x, c.y, c.z, c.w])
+            .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+        let emissive_strength = material.emissive_intensity().unwrap_or(1.0);
+        let emissive_factor = material
+            .emissive_color()
+            .map(|c| {
+                [
+                    c.x * emissive_strength,
+                    c.y * emissive_strength,
+                    c.z * emissive_strength,
+                ]
+            })
+            .unwrap_or([0.0, 0.0, 0.0]);
         let occlusion_strength = 1.0;
 
-        let base_uv_index = base_info.map(|i| i.uv_index).unwrap_or(0);
-        let normal_uv_index = normal_info.map(|i| i.uv_index).unwrap_or(0);
-        let mr_uv_index = mr_info.map(|i| i.uv_index).unwrap_or(0);
-        let emissive_uv_index = emissive_info.map(|i| i.uv_index).unwrap_or(0);
+        let ao_uv_index = occlusion_info.as_ref().map(|i| i.uv_index).unwrap_or(0);
+        let base_uv_index = base_info.as_ref().map(|i| i.uv_index).unwrap_or(0);
+        let normal_uv_index = normal_info.as_ref().map(|i| i.uv_index).unwrap_or(0);
+        let mr_uv_index = mr_info.as_ref().map(|i| i.uv_index).unwrap_or(0);
+        let emissive_uv_index = emissive_info.as_ref().map(|i| i.uv_index).unwrap_or(0);
+
+        let base_uv_transform = base_info
+            .as_ref()
+            .map(|i| uv_transform_to_mat4(&i.uv_transform))
+            .unwrap_or(glam::Mat4::IDENTITY);
+        let normal_uv_transform = normal_info
+            .as_ref()
+            .map(|i| uv_transform_to_mat4(&i.uv_transform))
+            .unwrap_or(glam::Mat4::IDENTITY);
+        let mr_uv_transform = mr_info
+            .as_ref()
+            .map(|i| uv_transform_to_mat4(&i.uv_transform))
+            .unwrap_or(glam::Mat4::IDENTITY);
+        let emissive_uv_transform = emissive_info
+            .as_ref()
+            .map(|i| uv_transform_to_mat4(&i.uv_transform))
+            .unwrap_or(glam::Mat4::IDENTITY);
+        let ao_uv_transform = occlusion_info
+            .as_ref()
+            .map(|i| uv_transform_to_mat4(&i.uv_transform))
+            .unwrap_or(glam::Mat4::IDENTITY);
+
+        let normal_scale = material.bump_scaling().unwrap_or(1.0);
+        let has_opacity_tex = material.opacity_texture(0).is_some();
+        let alpha_mode = if has_opacity_tex {
+            1u32
+        } else if matches!(
+            material.blend_mode(),
+            Some(
+                asset_importer::material::BlendMode::Default
+                    | asset_importer::material::BlendMode::Additive
+            )
+        ) {
+            2u32
+        } else {
+            0u32
+        };
+        let alpha_cutoff = 0.5f32;
 
         Ok(LoadedPbr {
             base_color,
@@ -549,6 +670,14 @@ impl ModelLoader {
             normal_uv_index,
             mr_uv_index,
             emissive_uv_index,
+            base_uv_transform,
+            normal_uv_transform,
+            mr_uv_transform,
+            emissive_uv_transform,
+            ao_uv_transform,
+            normal_scale,
+            alpha_mode,
+            alpha_cutoff,
         })
     }
 

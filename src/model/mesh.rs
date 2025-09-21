@@ -11,15 +11,17 @@ pub struct Vertex {
     pub tex_coords: [f32; 2],
     pub tangent: [f32; 4],
     pub tex_coords1: [f32; 2],
+    pub color: [f32; 4],
 }
 
 impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+    const ATTRIBS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x3,
         2 => Float32x2,
         3 => Float32x4,
-        4 => Float32x2
+        4 => Float32x2,
+        5 => Float32x4
     ];
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {

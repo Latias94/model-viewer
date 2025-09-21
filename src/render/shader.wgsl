@@ -6,6 +6,7 @@ struct VertexInput {
     @location(2) tex_coords: vec2<f32>,
     @location(3) tangent: vec4<f32>,
     @location(4) tex_coords1: vec2<f32>,
+    @location(5) color: vec4<f32>,
 }
 
 struct VertexOutput {
@@ -16,6 +17,7 @@ struct VertexOutput {
     @location(3) world_tangent: vec3<f32>,
     @location(4) tangent_sign: f32,
     @location(5) tex_coords1: vec2<f32>,
+    @location(6) color: vec4<f32>,
 }
 
 struct Uniforms {
@@ -40,6 +42,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
     out.tex_coords = input.tex_coords;
     out.tex_coords1 = input.tex_coords1;
+    out.color = input.color;
 
     // Transform tangent to world space
     out.world_tangent = (uniforms.normal_matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz;
@@ -57,6 +60,7 @@ struct FragmentInput {
     @location(3) world_tangent: vec3<f32>,
     @location(4) tangent_sign: f32,
     @location(5) tex_coords1: vec2<f32>,
+    @location(6) color: vec4<f32>,
 }
 
 struct LightingData {
@@ -65,8 +69,6 @@ struct LightingData {
     view_position: vec3<f32>,
     ambient_strength: f32,
     lighting_intensity: f32,
-    alpha_cutoff: f32,
-    alpha_mode: u32,
 }
 
 @group(1) @binding(0)
@@ -83,7 +85,15 @@ struct MaterialParams {
     normal_uv_index: u32,
     mr_uv_index: u32,
     emissive_uv_index: u32,
-    _pad0: vec2<f32>,
+    normal_scale: f32,
+    alpha_cutoff: f32,
+    alpha_mode: u32,
+    _pad0: u32,
+    base_uv_transform: mat4x4<f32>,
+    normal_uv_transform: mat4x4<f32>,
+    mr_uv_transform: mat4x4<f32>,
+    emissive_uv_transform: mat4x4<f32>,
+    ao_uv_transform: mat4x4<f32>,
 }
 
 @group(2) @binding(0) var tex_base_color: texture_2d<f32>;
@@ -124,17 +134,30 @@ fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f
 @fragment
 fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     // Flip Y coordinate to fix texture orientation
-    let uv0 = vec2<f32>(input.tex_coords.x, 1.0 - input.tex_coords.y);
-    let uv1 = vec2<f32>(input.tex_coords1.x, 1.0 - input.tex_coords1.y);
-    let uv_base = select(uv0, uv1, material.base_uv_index == 1u);
-    let uv_norm = select(uv0, uv1, material.normal_uv_index == 1u);
-    let uv_mr = select(uv0, uv1, material.mr_uv_index == 1u);
-    let uv_em = select(uv0, uv1, material.emissive_uv_index == 1u);
+    let uv0_raw = input.tex_coords;
+    let uv1_raw = input.tex_coords1;
+    let uv0_base = (material.base_uv_transform * vec4<f32>(uv0_raw.x, uv0_raw.y, 0.0, 1.0)).xy;
+    let uv1_base = (material.base_uv_transform * vec4<f32>(uv1_raw.x, uv1_raw.y, 0.0, 1.0)).xy;
+    let uv0_norm = (material.normal_uv_transform * vec4<f32>(uv0_raw.x, uv0_raw.y, 0.0, 1.0)).xy;
+    let uv1_norm = (material.normal_uv_transform * vec4<f32>(uv1_raw.x, uv1_raw.y, 0.0, 1.0)).xy;
+    let uv0_mr = (material.mr_uv_transform * vec4<f32>(uv0_raw.x, uv0_raw.y, 0.0, 1.0)).xy;
+    let uv1_mr = (material.mr_uv_transform * vec4<f32>(uv1_raw.x, uv1_raw.y, 0.0, 1.0)).xy;
+    let uv0_em = (material.emissive_uv_transform * vec4<f32>(uv0_raw.x, uv0_raw.y, 0.0, 1.0)).xy;
+    let uv1_em = (material.emissive_uv_transform * vec4<f32>(uv1_raw.x, uv1_raw.y, 0.0, 1.0)).xy;
+    let uv_base0 = select(uv0_base, uv1_base, material.base_uv_index == 1u);
+    let uv_norm0 = select(uv0_norm, uv1_norm, material.normal_uv_index == 1u);
+    let uv_mr0 = select(uv0_mr, uv1_mr, material.mr_uv_index == 1u);
+    let uv_em0 = select(uv0_em, uv1_em, material.emissive_uv_index == 1u);
+    // Flip Y to match texture orientation
+    let uv_base = vec2<f32>(uv_base0.x, 1.0 - uv_base0.y);
+    let uv_norm = vec2<f32>(uv_norm0.x, 1.0 - uv_norm0.y);
+    let uv_mr = vec2<f32>(uv_mr0.x, 1.0 - uv_mr0.y);
+    let uv_em = vec2<f32>(uv_em0.x, 1.0 - uv_em0.y);
 
     // Sample base color (sRGB -> linear handled by texture format)
     let base_sample = textureSample(tex_base_color, samp_base_color, uv_base);
-    let base = base_sample.rgb * material.base_color_factor.rgb;
-    let alpha = base_sample.a * material.base_color_factor.a;
+    var base = base_sample.rgb * material.base_color_factor.rgb * input.color.rgb;
+    var alpha = base_sample.a * material.base_color_factor.a * input.color.a;
 
     // Metallic-Roughness (linear)
     let mr = textureSample(tex_metal_rough, samp_metal_rough, uv_mr).rgb;
@@ -146,7 +169,8 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     let T = normalize(input.world_tangent);
     let B = normalize(cross(N, T) * input.tangent_sign);
     let tbn = mat3x3<f32>(T, B, N);
-    let nmap = textureSample(tex_normal, samp_normal, uv_norm).xyz * 2.0 - vec3<f32>(1.0, 1.0, 1.0);
+    var nmap = textureSample(tex_normal, samp_normal, uv_norm).xyz * 2.0 - vec3<f32>(1.0, 1.0, 1.0);
+    nmap = vec3<f32>(nmap.x * material.normal_scale, nmap.y * material.normal_scale, nmap.z);
     let Nn = normalize(tbn * nmap);
 
     // Lighting vectors
@@ -174,13 +198,16 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     var color = (diffuse + specular) * radiance * NdotL;
 
     // Ambient + AO
-    let ao_uv = select(input.tex_coords, input.tex_coords1, material.ao_uv_index == 1u);
+    let uv0_ao = (material.ao_uv_transform * vec4<f32>(uv0_raw.x, uv0_raw.y, 0.0, 1.0)).xy;
+    let uv1_ao = (material.ao_uv_transform * vec4<f32>(uv1_raw.x, uv1_raw.y, 0.0, 1.0)).xy;
+    let ao_uv0 = select(uv0_ao, uv1_ao, material.ao_uv_index == 1u);
+    let ao_uv = vec2<f32>(ao_uv0.x, 1.0 - ao_uv0.y);
     let ao = textureSample(tex_occlusion, samp_occlusion, ao_uv).r * material.occlusion_strength;
     let ambient = lighting.ambient_strength * base;
     color = ambient * ao + color * lighting.lighting_intensity;
 
     // Alpha mask (cutout)
-    if (lighting.alpha_mode != 0u && alpha < lighting.alpha_cutoff) {
+    if (material.alpha_mode == 1u && alpha < material.alpha_cutoff) {
         discard;
     }
 

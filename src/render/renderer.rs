@@ -170,8 +170,6 @@ impl Renderer {
             &self.queue,
             ui.enable_lighting(),
             ui.light_intensity(),
-            ui.alpha_mask_enabled(),
-            ui.alpha_cutoff(),
         );
 
         let output = match self.surface.get_current_texture() {

@@ -44,9 +44,6 @@ pub struct LightingData {
     pub ambient_strength: f32,
     pub lighting_intensity: f32,
     pub _padding3: [f32; 3],
-    pub alpha_cutoff: f32,
-    pub alpha_mode: u32,
-    pub _padding4: [u32; 2],
 }
 
 #[repr(C)]
@@ -62,7 +59,16 @@ pub struct MaterialParams {
     pub normal_uv_index: u32,
     pub mr_uv_index: u32,
     pub emissive_uv_index: u32,
-    pub _pad: [f32; 5],
+    pub normal_scale: f32,
+    pub alpha_cutoff: f32,
+    pub alpha_mode: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub base_uv_transform: [[f32; 4]; 4],
+    pub normal_uv_transform: [[f32; 4]; 4],
+    pub mr_uv_transform: [[f32; 4]; 4],
+    pub emissive_uv_transform: [[f32; 4]; 4],
+    pub ao_uv_transform: [[f32; 4]; 4],
 }
 
 impl Default for MaterialParams {
@@ -78,7 +84,16 @@ impl Default for MaterialParams {
             normal_uv_index: 0,
             mr_uv_index: 0,
             emissive_uv_index: 0,
-            _pad: [0.0; 5],
+            normal_scale: 1.0,
+            alpha_cutoff: 0.5,
+            alpha_mode: 0,
+            _pad0: 0,
+            _pad1: 0,
+            base_uv_transform: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            normal_uv_transform: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            mr_uv_transform: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            emissive_uv_transform: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            ao_uv_transform: glam::Mat4::IDENTITY.to_cols_array_2d(),
         }
     }
 }
@@ -94,9 +109,6 @@ impl Default for LightingData {
             ambient_strength: 0.3,
             lighting_intensity: 1.0,
             _padding3: [0.0; 3],
-            alpha_cutoff: 0.5,
-            alpha_mode: 0,
-            _padding4: [0; 2],
         }
     }
 }
@@ -419,8 +431,6 @@ impl ModelRenderPipeline {
         queue: &wgpu::Queue,
         lighting_enabled: bool,
         light_intensity: f32,
-        alpha_mask: bool,
-        alpha_cutoff: f32,
     ) {
         self.uniforms.update_view_proj(camera, config);
         self.lighting_data.view_position = camera.position.to_array();
@@ -431,8 +441,6 @@ impl ModelRenderPipeline {
             self.lighting_data.ambient_strength = 1.0;
             self.lighting_data.lighting_intensity = 0.0;
         }
-        self.lighting_data.alpha_mode = if alpha_mask { 1 } else { 0 };
-        self.lighting_data.alpha_cutoff = alpha_cutoff;
 
         queue.write_buffer(
             &self.uniform_buffer,

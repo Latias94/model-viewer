@@ -6,6 +6,28 @@ pub struct Texture {
     pub sampler: wgpu::Sampler,
 }
 
+pub struct TextureSamplerParams {
+    pub address_mode_u: wgpu::AddressMode,
+    pub address_mode_v: wgpu::AddressMode,
+    pub address_mode_w: wgpu::AddressMode,
+    pub mag_filter: wgpu::FilterMode,
+    pub min_filter: wgpu::FilterMode,
+    pub mipmap_filter: wgpu::FilterMode,
+}
+
+impl Default for TextureSamplerParams {
+    fn default() -> Self {
+        Self {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+        }
+    }
+}
+
 impl Texture {
     pub fn from_color(
         device: &wgpu::Device,
@@ -91,6 +113,24 @@ impl Texture {
         label: Option<&str>,
         srgb: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::from_image_with_format_and_sampler_params(
+            device,
+            queue,
+            img,
+            label,
+            srgb,
+            &TextureSamplerParams::default(),
+        )
+    }
+
+    pub fn from_image_with_format_and_sampler_params(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        img: &image::DynamicImage,
+        label: Option<&str>,
+        srgb: bool,
+        sampler_params: &TextureSamplerParams,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut rgba = img.to_rgba8();
         let mut dimensions = img.dimensions();
 
@@ -101,9 +141,10 @@ impl Texture {
         };
 
         // Compute mip count
-        let mip_level_count = 1 + (std::cmp::max(dimensions.0, dimensions.1) as f32)
-            .log2()
-            .floor() as u32;
+        let mip_level_count = 1
+            + (std::cmp::max(dimensions.0, dimensions.1) as f32)
+                .log2()
+                .floor() as u32;
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label,
@@ -134,7 +175,11 @@ impl Texture {
                 bytes_per_row: Some(4 * dimensions.0),
                 rows_per_image: Some(dimensions.1),
             },
-            wgpu::Extent3d { width: dimensions.0, height: dimensions.1, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: dimensions.0,
+                height: dimensions.1,
+                depth_or_array_layers: 1,
+            },
         );
 
         // CPU-generate mips
@@ -154,10 +199,23 @@ impl Texture {
             );
             let bytes = resized.as_raw();
             queue.write_texture(
-                wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: level, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: level,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
                 bytes,
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * next_w), rows_per_image: Some(next_h) },
-                wgpu::Extent3d { width: next_w, height: next_h, depth_or_array_layers: 1 },
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * next_w),
+                    rows_per_image: Some(next_h),
+                },
+                wgpu::Extent3d {
+                    width: next_w,
+                    height: next_h,
+                    depth_or_array_layers: 1,
+                },
             );
             prev = resized;
             prev_w = next_w;
@@ -166,15 +224,19 @@ impl Texture {
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            address_mode_w: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            address_mode_u: sampler_params.address_mode_u,
+            address_mode_v: sampler_params.address_mode_v,
+            address_mode_w: sampler_params.address_mode_w,
+            mag_filter: sampler_params.mag_filter,
+            min_filter: sampler_params.min_filter,
+            mipmap_filter: sampler_params.mipmap_filter,
             ..Default::default()
         });
 
-        Ok(Self { texture, view, sampler })
+        Ok(Self {
+            texture,
+            view,
+            sampler,
+        })
     }
 }

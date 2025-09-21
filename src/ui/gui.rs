@@ -265,6 +265,10 @@ impl Ui {
         self.orbit_mode
     }
 
-    pub fn alpha_mask_enabled(&self) -> bool { self.alpha_mask }
-    pub fn alpha_cutoff(&self) -> f32 { self.alpha_cutoff }
+    pub fn alpha_mask_enabled(&self) -> bool {
+        self.alpha_mask
+    }
+    pub fn alpha_cutoff(&self) -> f32 {
+        self.alpha_cutoff
+    }
 }
