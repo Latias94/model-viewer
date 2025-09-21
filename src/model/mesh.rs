@@ -41,10 +41,21 @@ pub struct Mesh {
     pub index_buffer: wgpu::Buffer,
     pub material_bind_group: Option<wgpu::BindGroup>,
     pub material_params_buffer: Option<wgpu::Buffer>,
+    pub material_params_cpu: Option<crate::render::pipeline::MaterialParams>,
+    pub material_debug: Option<MaterialDebug>,
     pub model_matrix: glam::Mat4,
     pub two_sided: bool,
     pub blend_mode: Option<asset_importer::material::BlendMode>,
     pub opaque_transparent: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct MaterialDebug {
+    pub base: String,
+    pub normal: String,
+    pub mr: String,
+    pub ao: String,
+    pub emissive: String,
 }
 
 impl Mesh {
@@ -56,6 +67,8 @@ impl Mesh {
         textures: Vec<Texture>,
         material_bind_group: Option<wgpu::BindGroup>,
         material_params_buffer: Option<wgpu::Buffer>,
+        material_params_cpu: Option<crate::render::pipeline::MaterialParams>,
+        material_debug: Option<MaterialDebug>,
         model_matrix: glam::Mat4,
         two_sided: bool,
         blend_mode: Option<asset_importer::material::BlendMode>,
@@ -81,6 +94,8 @@ impl Mesh {
             index_buffer,
             material_bind_group,
             material_params_buffer,
+            material_params_cpu,
+            material_debug,
             model_matrix,
             two_sided,
             blend_mode,

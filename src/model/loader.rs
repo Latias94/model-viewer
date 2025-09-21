@@ -1,4 +1,4 @@
-use crate::model::{Mesh, Model, Vertex};
+use crate::model::{Mesh, Model, Vertex, mesh::MaterialDebug};
 use asset_importer::{Importer, postprocess::PostProcessSteps};
 use wgpu::util::DeviceExt;
 
@@ -260,8 +260,11 @@ impl ModelLoader {
         let mut material_params_buffer: Option<wgpu::Buffer> = None;
 
         let mut opaque_transparent = false;
+        let mut material_params_cpu: Option<crate::render::pipeline::MaterialParams> = None;
+        let mut material_debug: Option<MaterialDebug> = None;
         if let Some(material) = scene.material(mesh.material_index()) {
-            let loaded = Self::load_pbr_textures(device, queue, &material, base_path).await?;
+            let loaded =
+                Self::load_pbr_textures(device, queue, &material, base_path, scene).await?;
 
             // Create defaults if missing, keep strong ownership in `textures`
             let base_color = loaded.base_color.unwrap_or_else(|| {
@@ -400,12 +403,15 @@ impl ModelLoader {
 
             material_bind_group = Some(bg);
             material_params_buffer = Some(params_buffer);
+            material_params_cpu = Some(params);
+            material_debug = Some(MaterialDebug {
+                base: "default".to_string(),
+                normal: "default".to_string(),
+                mr: "default".to_string(),
+                ao: "default".to_string(),
+                emissive: "default".to_string(),
+            });
 
-            // push strong references into mesh textures vector
-            textures.push(base_color);
-            textures.push(normal);
-            textures.push(mra);
-            textures.push(occlusion);
             textures.push(emissive);
         } else {
             // Create a simple default material
@@ -504,11 +510,15 @@ impl ModelLoader {
 
             material_bind_group = Some(bg);
             material_params_buffer = Some(params_buffer);
-            opaque_transparent = false;
-            textures.push(base_color);
-            textures.push(normal);
-            textures.push(mra);
-            textures.push(occlusion);
+            material_params_cpu = Some(params);
+            material_debug = Some(MaterialDebug {
+                base: "default".to_string(),
+                normal: "default".to_string(),
+                mr: "default".to_string(),
+                ao: "default".to_string(),
+                emissive: "default".to_string(),
+            });
+
             textures.push(emissive);
         }
 
@@ -520,6 +530,8 @@ impl ModelLoader {
             textures,
             material_bind_group,
             material_params_buffer,
+            material_params_cpu,
+            material_debug,
             world_transform,
             // material flags
             scene
@@ -538,6 +550,7 @@ impl ModelLoader {
         queue: &wgpu::Queue,
         material: &asset_importer::material::Material,
         base_path: &str,
+        scene: &asset_importer::scene::Scene,
     ) -> Result<LoadedPbr, Box<dyn std::error::Error>> {
         // helper: map modes and transforms and create textures with custom samplers
         fn map_mode(m: asset_importer::material::TextureMapMode) -> wgpu::AddressMode {
@@ -574,40 +587,84 @@ impl ModelLoader {
             }
             let info = material.texture(ty, 0)?;
             let texture_path = info.path.clone();
-            let full_path = if std::path::Path::new(&texture_path).is_absolute() {
-                texture_path
-            } else {
-                let base_dir = std::path::Path::new(base_path)
-                    .parent()
-                    .unwrap_or(std::path::Path::new(""));
-                base_dir.join(&texture_path).to_string_lossy().to_string()
+            let params = crate::render::texture::TextureSamplerParams {
+                address_mode_u: map_mode(info.map_modes[0]),
+                address_mode_v: map_mode(info.map_modes[1]),
+                address_mode_w: wgpu::AddressMode::Repeat,
+                ..Default::default()
             };
-            match image::open(&full_path) {
-                Ok(img) => {
-                    let params = crate::render::texture::TextureSamplerParams {
-                        address_mode_u: map_mode(info.map_modes[0]),
-                        address_mode_v: map_mode(info.map_modes[1]),
-                        address_mode_w: wgpu::AddressMode::Repeat,
-                        ..Default::default()
-                    };
-                    match crate::render::Texture::from_image_with_format_and_sampler_params(
-                        device,
-                        queue,
-                        &img,
-                        Some(&format!("texture_{}", full_path)),
-                        srgb,
-                        &params,
-                    ) {
-                        Ok(tex) => Some((tex, info)),
+            if texture_path.starts_with('*') {
+                if let Some(tex) = scene.embedded_texture_by_name(&texture_path) {
+                    match tex.data() {
+                        Ok(asset_importer::texture::TextureData::Compressed(bytes)) => {
+                            if let Ok(img) = image::load_from_memory(&bytes) {
+                                if let Ok(t) = crate::render::Texture::from_image_with_format_and_sampler_params(
+                                    device, queue, &img, Some("embedded_tex"), srgb, &params,
+                                ) { return Some((t, info)); }
+                            }
+                            None
+                        }
+                        Ok(asset_importer::texture::TextureData::Texels(texels)) => {
+                            let (w, h) = tex.dimensions();
+                            let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+                            for t in texels {
+                                rgba.push(t.r);
+                                rgba.push(t.g);
+                                rgba.push(t.b);
+                                rgba.push(t.a);
+                            }
+                            if let Ok(t) = crate::render::Texture::from_rgba8_with_params(
+                                device,
+                                queue,
+                                &rgba,
+                                w,
+                                h,
+                                srgb,
+                                &params,
+                                Some("embedded_tex"),
+                            ) {
+                                return Some((t, info));
+                            }
+                            None
+                        }
                         Err(e) => {
-                            log::warn!("Failed to create texture {}: {}", full_path, e);
+                            log::warn!("Failed to read embedded texture {}: {}", texture_path, e);
                             None
                         }
                     }
-                }
-                Err(e) => {
-                    log::warn!("Failed to load texture {}: {}", full_path, e);
+                } else {
                     None
+                }
+            } else {
+                let full_path = if std::path::Path::new(&texture_path).is_absolute() {
+                    texture_path
+                } else {
+                    let base_dir = std::path::Path::new(base_path)
+                        .parent()
+                        .unwrap_or(std::path::Path::new(""));
+                    base_dir.join(&texture_path).to_string_lossy().to_string()
+                };
+                match image::open(&full_path) {
+                    Ok(img) => {
+                        match crate::render::Texture::from_image_with_format_and_sampler_params(
+                            device,
+                            queue,
+                            &img,
+                            Some(&format!("texture_{}", full_path)),
+                            srgb,
+                            &params,
+                        ) {
+                            Ok(tex) => Some((tex, info)),
+                            Err(e) => {
+                                log::warn!("Failed to create texture {}: {}", full_path, e);
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to load texture {}: {}", full_path, e);
+                        None
+                    }
                 }
             }
         };

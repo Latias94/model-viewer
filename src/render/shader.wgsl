@@ -238,20 +238,19 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     let ao = textureSample(tex_occlusion, samp_occlusion, ao_uv).r * material.emissive_occlusion.w;
 
     // Image Based Lighting (uses bound environment textures)
-    let F_ibl = fresnel_schlick(max(dot(Nn, V), 0.0), F0);
-    let kS = F_ibl; // fresnel for IBL
-    let kD = (vec3<f32>(1.0, 1.0, 1.0) - kS) * (1.0 - metallic);
-    // Diffuse from irradiance cube
+    let NdotV = max(dot(Nn, V), 0.0);
+    // Diffuse IBL
     let env_d = textureSample(tex_irradiance, samp_irradiance, Nn).rgb;
+    let kD = (vec3<f32>(1.0, 1.0, 1.0) - F0) * (1.0 - metallic);
     let ibl_diffuse = kD * base * env_d / 3.14159265;
-    // Specular from prefiltered environment (LOD ~= roughness)
+    // Specular IBL (split-sum): prefilter * (F0*brdf.x + brdf.y)
     let Rv = normalize(reflect(-V, Nn));
     let max_lod = max(lighting.counts_pad.z - 1.0, 0.0);
     let lod = clamp(roughness * max_lod, 0.0, max_lod);
-    let env_s = textureSampleLevel(tex_prefilter, samp_prefilter, Rv, lod).rgb;
-    let gloss = (1.0 - roughness);
-    let ibl_spec = env_s * F_ibl * (gloss * gloss);
-    let ibl = (ibl_diffuse + ibl_spec) * lighting.viewpos_ambient.w * ao;
+    let pre = textureSampleLevel(tex_prefilter, samp_prefilter, Rv, lod).rgb;
+    let brdf = textureSample(tex_brdf_lut, samp_brdf_lut, vec2<f32>(NdotV, roughness)).rg;
+    let spec_color = pre * (F0 * brdf.x + brdf.y);
+    let ibl = (ibl_diffuse + spec_color) * lighting.viewpos_ambient.w * ao;
     color = color + ibl;
 
     // Alpha mask (cutout)

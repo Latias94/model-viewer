@@ -83,8 +83,11 @@ impl RenderPassExec for TransparentPass {
             if mesh.opaque_transparent {
                 continue;
             }
-            // 选择透明 pipeline（双面与否由 two_sided 决定，但我们统一使用 alpha_blend）
-            rpass.set_pipeline(&pipeline.pipeline_alpha);
+            if mesh.two_sided {
+                rpass.set_pipeline(&pipeline.pipeline_alpha_double);
+            } else {
+                rpass.set_pipeline(&pipeline.pipeline_alpha);
+            }
             if let Some(bg) = &mesh.material_bind_group {
                 rpass.set_bind_group(2, bg, &[]);
             }

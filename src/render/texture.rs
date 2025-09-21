@@ -29,6 +29,112 @@ impl Default for TextureSamplerParams {
 }
 
 impl Texture {
+    pub fn from_rgba8_with_params(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        srgb: bool,
+        sampler_params: &TextureSamplerParams,
+        label: Option<&str>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let format = if srgb {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        let mip_level_count = 1 + (std::cmp::max(width, height) as f32).log2().floor() as u32;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label,
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        // Generate mips on CPU like other paths
+        let mut prev = rgba.to_vec();
+        let mut prev_w = width;
+        let mut prev_h = height;
+        for level in 1..mip_level_count {
+            let next_w = std::cmp::max(1, prev_w / 2);
+            let next_h = std::cmp::max(1, prev_h / 2);
+            let prev_img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(prev_w, prev_h, prev)
+                .ok_or("invalid rgba8 buffer")?;
+            let resized = image::imageops::resize(
+                &prev_img,
+                next_w,
+                next_h,
+                image::imageops::FilterType::Triangle,
+            );
+            let bytes = resized.as_raw();
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: level,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * next_w),
+                    rows_per_image: Some(next_h),
+                },
+                wgpu::Extent3d {
+                    width: next_w,
+                    height: next_h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            prev = resized.to_vec();
+            prev_w = next_w;
+            prev_h = next_h;
+        }
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: sampler_params.address_mode_u,
+            address_mode_v: sampler_params.address_mode_v,
+            address_mode_w: sampler_params.address_mode_w,
+            mag_filter: sampler_params.mag_filter,
+            min_filter: sampler_params.min_filter,
+            mipmap_filter: sampler_params.mipmap_filter,
+            ..Default::default()
+        });
+
+        Ok(Self {
+            texture,
+            view,
+            sampler,
+        })
+    }
     pub fn from_color(
         device: &wgpu::Device,
         queue: &wgpu::Queue,

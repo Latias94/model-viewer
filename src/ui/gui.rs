@@ -116,6 +116,42 @@ impl Ui {
                             }
                         });
 
+                    if let Some(model) = model {
+                        ui.separator();
+                        egui::CollapsingHeader::new("Materials")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                for (i, mesh) in model.meshes.iter().enumerate() {
+                                    ui.group(|ui| {
+                                        ui.label(format!("Mesh #{}", i));
+                                        ui.label(format!("two_sided: {}", mesh.two_sided));
+                                        ui.label(format!(
+                                            "blend_mode: {}",
+                                            match mesh.blend_mode {
+                                                Some(asset_importer::material::BlendMode::Default) => "Default",
+                                                Some(asset_importer::material::BlendMode::Additive) => "Additive",
+                                                Some(_) => "Other",
+                                                None => "None",
+                                            }
+                                        ));
+                                        ui.label(format!("opaque_transparent: {}", mesh.opaque_transparent));
+                                        if let Some(p) = &mesh.material_params_cpu {
+                                            ui.separator();
+                                            ui.label("MaterialParams:");
+                                            ui.monospace(format!("base_color_factor = [{:.3}, {:.3}, {:.3}, {:.3}]",
+                                                p.base_color_factor[0], p.base_color_factor[1], p.base_color_factor[2], p.base_color_factor[3]));
+                                            ui.monospace(format!("metallic = {:.3}, roughness = {:.3}, normal_scale = {:.3}, alpha_cutoff = {:.3}",
+                                                p.mr_factors[0], p.mr_factors[1], p.mr_factors[2], p.mr_factors[3]));
+                                            ui.monospace(format!("uv_indices (ao, base, normal, mr) = [{}, {}, {}, {}]",
+                                                p.uv_indices[0], p.uv_indices[1], p.uv_indices[2], p.uv_indices[3]));
+                                            ui.monospace(format!("misc (emissive_uv, alpha_mode) = [{}, {}]",
+                                                p.misc[0], p.misc[1]));
+                                        }
+                                    });
+                                }
+                            });
+                    }
+
                     ui.separator();
                     egui::CollapsingHeader::new("Rendering Options")
                         .default_open(true)
