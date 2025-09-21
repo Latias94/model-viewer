@@ -10,6 +10,7 @@ pub struct Uniforms {
     pub view_proj: [[f32; 4]; 4],
     pub model: [[f32; 4]; 4],
     pub normal_matrix: [[f32; 4]; 4],
+    pub view_proj_inv: [[f32; 4]; 4],
 }
 
 impl Uniforms {
@@ -18,6 +19,7 @@ impl Uniforms {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             model: Mat4::IDENTITY.to_cols_array_2d(),
             normal_matrix: Mat4::IDENTITY.to_cols_array_2d(),
+            view_proj_inv: Mat4::IDENTITY.to_cols_array_2d(),
         }
     }
 
@@ -29,7 +31,9 @@ impl Uniforms {
             0.1,
             100.0,
         );
-        self.view_proj = (proj * view).to_cols_array_2d();
+        let vp = proj * view;
+        self.view_proj = vp.to_cols_array_2d();
+        self.view_proj_inv = vp.inverse().to_cols_array_2d();
     }
 }
 
@@ -56,20 +60,10 @@ pub struct LightingData {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct MaterialParams {
     pub base_color_factor: [f32; 4],
-    pub emissive_factor: [f32; 3],
-    pub occlusion_strength: f32,
-    pub metallic_factor: f32,
-    pub roughness_factor: f32,
-    pub ao_uv_index: u32,
-    pub base_uv_index: u32,
-    pub normal_uv_index: u32,
-    pub mr_uv_index: u32,
-    pub emissive_uv_index: u32,
-    pub normal_scale: f32,
-    pub alpha_cutoff: f32,
-    pub alpha_mode: u32,
-    pub _pad0: u32,
-    pub _pad1: u32,
+    pub emissive_occlusion: [f32; 4], // emissive.xyz, occlusion_strength
+    pub mr_factors: [f32; 4],         // metallic, roughness, normal_scale, alpha_cutoff
+    pub uv_indices: [u32; 4],         // ao, base, normal, mr
+    pub misc: [u32; 4],               // emissive_uv_index, alpha_mode, pad, pad
     pub base_uv_transform: [[f32; 4]; 4],
     pub normal_uv_transform: [[f32; 4]; 4],
     pub mr_uv_transform: [[f32; 4]; 4],
@@ -81,20 +75,10 @@ impl Default for MaterialParams {
     fn default() -> Self {
         Self {
             base_color_factor: [1.0, 1.0, 1.0, 1.0],
-            emissive_factor: [0.0, 0.0, 0.0],
-            occlusion_strength: 1.0,
-            metallic_factor: 1.0,
-            roughness_factor: 1.0,
-            ao_uv_index: 0,
-            base_uv_index: 0,
-            normal_uv_index: 0,
-            mr_uv_index: 0,
-            emissive_uv_index: 0,
-            normal_scale: 1.0,
-            alpha_cutoff: 0.5,
-            alpha_mode: 0,
-            _pad0: 0,
-            _pad1: 0,
+            emissive_occlusion: [0.0, 0.0, 0.0, 1.0],
+            mr_factors: [1.0, 1.0, 1.0, 0.5],
+            uv_indices: [0, 0, 0, 0],
+            misc: [0, 0, 0, 0],
             base_uv_transform: glam::Mat4::IDENTITY.to_cols_array_2d(),
             normal_uv_transform: glam::Mat4::IDENTITY.to_cols_array_2d(),
             mr_uv_transform: glam::Mat4::IDENTITY.to_cols_array_2d(),
@@ -126,11 +110,16 @@ pub struct ModelRenderPipeline {
     pub pipeline_alpha_double: wgpu::RenderPipeline,
     pub pipeline_normals: wgpu::RenderPipeline,
     pub pipeline_wireframe: Option<wgpu::RenderPipeline>,
+    pub pipeline_skybox: wgpu::RenderPipeline,
     pub uniform_buffer: wgpu::Buffer,
     pub lighting_buffer: wgpu::Buffer,
     pub uniform_bind_group: wgpu::BindGroup,
     pub lighting_bind_group: wgpu::BindGroup,
     pub material_bind_group_layout: wgpu::BindGroupLayout,
+    pub environment_bind_group_layout: wgpu::BindGroupLayout,
+    pub environment_bind_group: wgpu::BindGroup,
+    pub environment: crate::render::environment::Environment,
+    pub environment_mip_count: u32,
     pub uniforms: Uniforms,
     pub lighting_data: LightingData,
 }
@@ -145,6 +134,10 @@ impl ModelRenderPipeline {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Model Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+        let skybox_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Skybox Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("skybox.wgsl").into()),
         });
 
         // Create uniform buffers
@@ -168,7 +161,7 @@ impl ModelRenderPipeline {
                 label: Some("uniform_bind_group_layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -296,6 +289,65 @@ impl ModelRenderPipeline {
                 ],
             });
 
+        // Environment (IBL) bind group layout
+        let environment_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("environment_bind_group_layout"),
+                entries: &[
+                    // irradiance cube + sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::Cube,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // prefiltered cube + sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::Cube,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // BRDF LUT 2D + sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
         // Create bind groups
         let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("uniform_bind_group"),
@@ -322,7 +374,13 @@ impl ModelRenderPipeline {
                 &uniform_bind_group_layout,
                 &lighting_bind_group_layout,
                 &material_bind_group_layout,
+                &environment_bind_group_layout,
             ],
+            push_constant_ranges: &[],
+        });
+        let skybox_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Skybox Pipeline Layout"),
+            bind_group_layouts: &[&uniform_bind_group_layout, &environment_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -412,6 +470,89 @@ impl ModelRenderPipeline {
         } else {
             None
         };
+        let pipeline_skybox = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Skybox Pipeline"),
+            layout: Some(&skybox_layout),
+            vertex: wgpu::VertexState {
+                module: &skybox_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &skybox_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        // Environment resources and bind group (HDR -> IBL generation, fallback to dummy)
+        let environment = match crate::render::environment::Environment::from_hdr(
+            device,
+            queue,
+            "repo-ref/learn-wgpu-zh/docs/public/pure-sky.hdr",
+        ) {
+            Ok(env) => env,
+            Err(e) => {
+                log::warn!("Failed to generate IBL from HDR: {}. Using dummy env.", e);
+                crate::render::environment::Environment::create_dummy(device, queue)
+            }
+        };
+        let environment_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("environment_bind_group"),
+            layout: &environment_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&environment.irradiance_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&environment.irradiance_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&environment.prefiltered_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&environment.prefiltered_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&environment.brdf_lut_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&environment.brdf_lut_sampler),
+                },
+            ],
+        });
+
+        // Assume prefilter size 128 => 8 mips (1+log2(128))
+        let environment_mip_count: u32 = 8;
 
         Self {
             pipeline_solid,
@@ -420,11 +561,16 @@ impl ModelRenderPipeline {
             pipeline_alpha_double,
             pipeline_normals,
             pipeline_wireframe,
+            pipeline_skybox,
             uniform_buffer,
             lighting_buffer,
             uniform_bind_group,
             lighting_bind_group,
             material_bind_group_layout,
+            environment_bind_group_layout,
+            environment_bind_group,
+            environment,
+            environment_mip_count,
             uniforms,
             lighting_data,
         }
@@ -438,6 +584,7 @@ impl ModelRenderPipeline {
         lighting_enabled: bool,
         light_intensity: f32,
         scene_lights: Option<&[crate::model::LightInfo]>,
+        output_mode: u32,
     ) {
         self.uniforms.update_view_proj(camera, config);
         self.lighting_data.viewpos_ambient = [
@@ -468,6 +615,8 @@ impl ModelRenderPipeline {
             }
         }
         self.lighting_data.counts_pad[0] = count as f32;
+        self.lighting_data.counts_pad[1] = output_mode as f32;
+        self.lighting_data.counts_pad[2] = self.environment_mip_count as f32;
 
         queue.write_buffer(
             &self.uniform_buffer,

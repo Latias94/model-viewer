@@ -259,6 +259,7 @@ impl ModelLoader {
         let mut material_bind_group: Option<wgpu::BindGroup> = None;
         let mut material_params_buffer: Option<wgpu::Buffer> = None;
 
+        let mut opaque_transparent = false;
         if let Some(material) = scene.material(mesh.material_index()) {
             let loaded = Self::load_pbr_textures(device, queue, &material, base_path).await?;
 
@@ -311,20 +312,25 @@ impl ModelLoader {
 
             let params = crate::render::pipeline::MaterialParams {
                 base_color_factor: loaded.base_color_factor,
-                emissive_factor: loaded.emissive_factor,
-                occlusion_strength: loaded.occlusion_strength,
-                metallic_factor: loaded.metallic_factor,
-                roughness_factor: loaded.roughness_factor,
-                ao_uv_index: loaded.ao_uv_index,
-                base_uv_index: loaded.base_uv_index,
-                normal_uv_index: loaded.normal_uv_index,
-                mr_uv_index: loaded.mr_uv_index,
-                emissive_uv_index: loaded.emissive_uv_index,
-                normal_scale: loaded.normal_scale,
-                alpha_cutoff: loaded.alpha_cutoff,
-                alpha_mode: loaded.alpha_mode,
-                _pad0: 0,
-                _pad1: 0,
+                emissive_occlusion: [
+                    loaded.emissive_factor[0],
+                    loaded.emissive_factor[1],
+                    loaded.emissive_factor[2],
+                    loaded.occlusion_strength,
+                ],
+                mr_factors: [
+                    loaded.metallic_factor,
+                    loaded.roughness_factor,
+                    loaded.normal_scale,
+                    loaded.alpha_cutoff,
+                ],
+                uv_indices: [
+                    loaded.ao_uv_index,
+                    loaded.base_uv_index,
+                    loaded.normal_uv_index,
+                    loaded.mr_uv_index,
+                ],
+                misc: [loaded.emissive_uv_index, loaded.alpha_mode, 0, 0],
                 base_uv_transform: loaded.base_uv_transform.to_cols_array_2d(),
                 normal_uv_transform: loaded.normal_uv_transform.to_cols_array_2d(),
                 mr_uv_transform: loaded.mr_uv_transform.to_cols_array_2d(),
@@ -336,6 +342,10 @@ impl ModelLoader {
                 contents: bytemuck::cast_slice(&[params]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
+            // Heuristic: BLEND alpha mode but base alpha near 1.0 -> treat as opaque-transparent
+            if loaded.alpha_mode == 2u32 && params.base_color_factor[3] >= 0.98 {
+                opaque_transparent = true;
+            }
 
             let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("material_bind_group"),
@@ -494,6 +504,7 @@ impl ModelLoader {
 
             material_bind_group = Some(bg);
             material_params_buffer = Some(params_buffer);
+            opaque_transparent = false;
             textures.push(base_color);
             textures.push(normal);
             textures.push(mra);
@@ -518,6 +529,7 @@ impl ModelLoader {
             scene
                 .material(mesh.material_index())
                 .and_then(|m| m.blend_mode()),
+            opaque_transparent,
         )
     }
 

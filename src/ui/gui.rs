@@ -19,6 +19,7 @@ pub struct Ui {
     last_open_dir: Option<std::path::PathBuf>,
     alpha_mask: bool,
     alpha_cutoff: f32,
+    output_mode_index: usize,
 }
 
 impl Ui {
@@ -55,6 +56,7 @@ impl Ui {
             last_open_dir: initial_dir,
             alpha_mask: false,
             alpha_cutoff: 0.5,
+            output_mode_index: 0,
         }
     }
 
@@ -132,6 +134,26 @@ impl Ui {
                                 egui::Slider::new(&mut self.alpha_cutoff, 0.0..=1.0)
                                     .text("Alpha cutoff"),
                             );
+                            ui.separator();
+                            let modes = [
+                                "Final",
+                                "BaseColor",
+                                "Metallic",
+                                "Roughness",
+                                "Normal",
+                                "Occlusion",
+                                "Emissive",
+                                "Alpha",
+                                "TexCoord0",
+                                "TexCoord1",
+                            ];
+                            egui::ComboBox::from_label("Output Mode")
+                                .selected_text(modes[self.output_mode_index])
+                                .show_ui(ui, |ui| {
+                                    for (i, label) in modes.iter().enumerate() {
+                                        ui.selectable_value(&mut self.output_mode_index, i, *label);
+                                    }
+                                });
                         });
 
                     ui.separator();
@@ -270,5 +292,9 @@ impl Ui {
     }
     pub fn alpha_cutoff(&self) -> f32 {
         self.alpha_cutoff
+    }
+
+    pub fn output_mode(&self) -> u32 {
+        self.output_mode_index as u32
     }
 }

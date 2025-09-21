@@ -24,6 +24,7 @@ struct Uniforms {
     view_proj: mat4x4<f32>,
     model: mat4x4<f32>,
     normal_matrix: mat4x4<f32>,
+    view_proj_inv: mat4x4<f32>,
 }
 
 @group(0) @binding(0)
@@ -81,19 +82,10 @@ var<uniform> lighting: LightingData;
 
 struct MaterialParams {
     base_color_factor: vec4<f32>,
-    emissive_factor: vec3<f32>,
-    occlusion_strength: f32,
-    metallic_factor: f32,
-    roughness_factor: f32,
-    ao_uv_index: u32,
-    base_uv_index: u32,
-    normal_uv_index: u32,
-    mr_uv_index: u32,
-    emissive_uv_index: u32,
-    normal_scale: f32,
-    alpha_cutoff: f32,
-    alpha_mode: u32,
-    _pad0: u32,
+    emissive_occlusion: vec4<f32>, // emissive.xyz, occlusion_strength
+    mr_factors: vec4<f32>,         // metallic, roughness, normal_scale, alpha_cutoff
+    uv_indices: vec4<u32>,         // ao, base, normal, mr
+    misc: vec4<u32>,               // emissive_uv_index, alpha_mode, pad, pad
     base_uv_transform: mat4x4<f32>,
     normal_uv_transform: mat4x4<f32>,
     mr_uv_transform: mat4x4<f32>,
@@ -112,6 +104,14 @@ struct MaterialParams {
 @group(2) @binding(8) var tex_emissive: texture_2d<f32>;
 @group(2) @binding(9) var samp_emissive: sampler;
 @group(2) @binding(10) var<uniform> material: MaterialParams;
+
+// Environment IBL resources
+@group(3) @binding(0) var tex_irradiance: texture_cube<f32>;
+@group(3) @binding(1) var samp_irradiance: sampler;
+@group(3) @binding(2) var tex_prefilter: texture_cube<f32>;
+@group(3) @binding(3) var samp_prefilter: sampler;
+@group(3) @binding(4) var tex_brdf_lut: texture_2d<f32>;
+@group(3) @binding(5) var samp_brdf_lut: sampler;
 
 fn fresnel_schlick(cos_theta: f32, F0: vec3<f32>) -> vec3<f32> {
     return F0 + (vec3<f32>(1.0) - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
@@ -136,6 +136,15 @@ fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f
     return ggx1 * ggx2;
 }
 
+// Simple procedural sky environment (placeholder for IBL)
+fn sky_env(dir: vec3<f32>) -> vec3<f32> {
+    // Map direction.y to gradient
+    let t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+    let top = vec3<f32>(0.05, 0.08, 0.13);
+    let bottom = vec3<f32>(0.2, 0.22, 0.25);
+    return mix(bottom, top, t);
+}
+
 @fragment
 fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     // Flip Y coordinate to fix texture orientation
@@ -149,10 +158,10 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     let uv1_mr = (material.mr_uv_transform * vec4<f32>(uv1_raw.x, uv1_raw.y, 0.0, 1.0)).xy;
     let uv0_em = (material.emissive_uv_transform * vec4<f32>(uv0_raw.x, uv0_raw.y, 0.0, 1.0)).xy;
     let uv1_em = (material.emissive_uv_transform * vec4<f32>(uv1_raw.x, uv1_raw.y, 0.0, 1.0)).xy;
-    let uv_base0 = select(uv0_base, uv1_base, material.base_uv_index == 1u);
-    let uv_norm0 = select(uv0_norm, uv1_norm, material.normal_uv_index == 1u);
-    let uv_mr0 = select(uv0_mr, uv1_mr, material.mr_uv_index == 1u);
-    let uv_em0 = select(uv0_em, uv1_em, material.emissive_uv_index == 1u);
+    let uv_base0 = select(uv0_base, uv1_base, material.uv_indices.y == 1u);
+    let uv_norm0 = select(uv0_norm, uv1_norm, material.uv_indices.z == 1u);
+    let uv_mr0 = select(uv0_mr, uv1_mr, material.uv_indices.w == 1u);
+    let uv_em0 = select(uv0_em, uv1_em, material.misc.x == 1u);
     // Flip Y to match texture orientation
     let uv_base = vec2<f32>(uv_base0.x, 1.0 - uv_base0.y);
     let uv_norm = vec2<f32>(uv_norm0.x, 1.0 - uv_norm0.y);
@@ -166,8 +175,8 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
 
     // Metallic-Roughness (linear)
     let mr = textureSample(tex_metal_rough, samp_metal_rough, uv_mr).rgb;
-    let metallic = clamp(mr.b * material.metallic_factor, 0.0, 1.0);
-    let roughness = clamp(mr.g * material.roughness_factor, 0.04, 1.0);
+    let metallic = clamp(mr.b * material.mr_factors.x, 0.0, 1.0);
+    let roughness = clamp(mr.g * material.mr_factors.y, 0.04, 1.0);
 
     // Normal mapping
     let N = normalize(input.world_normal);
@@ -175,7 +184,7 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     let B = normalize(cross(N, T) * input.tangent_sign);
     let tbn = mat3x3<f32>(T, B, N);
     var nmap = textureSample(tex_normal, samp_normal, uv_norm).xyz * 2.0 - vec3<f32>(1.0, 1.0, 1.0);
-    nmap = vec3<f32>(nmap.x * material.normal_scale, nmap.y * material.normal_scale, nmap.z);
+    nmap = vec3<f32>(nmap.x * material.mr_factors.z, nmap.y * material.mr_factors.z, nmap.z);
     let Nn = normalize(tbn * nmap);
 
     let V = normalize(lighting.viewpos_ambient.xyz - input.world_position);
@@ -221,23 +230,66 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
         color += (diffuse + specular) * radiance * NdotL;
     }
 
-    // Ambient + AO
+    // AO
     let uv0_ao = (material.ao_uv_transform * vec4<f32>(uv0_raw.x, uv0_raw.y, 0.0, 1.0)).xy;
     let uv1_ao = (material.ao_uv_transform * vec4<f32>(uv1_raw.x, uv1_raw.y, 0.0, 1.0)).xy;
-    let ao_uv0 = select(uv0_ao, uv1_ao, material.ao_uv_index == 1u);
+    let ao_uv0 = select(uv0_ao, uv1_ao, material.uv_indices.x == 1u);
     let ao_uv = vec2<f32>(ao_uv0.x, 1.0 - ao_uv0.y);
-    let ao = textureSample(tex_occlusion, samp_occlusion, ao_uv).r * material.occlusion_strength;
-    let ambient = lighting.viewpos_ambient.w * base;
-    color = ambient * ao + color;
+    let ao = textureSample(tex_occlusion, samp_occlusion, ao_uv).r * material.emissive_occlusion.w;
+
+    // Image Based Lighting (uses bound environment textures)
+    let F_ibl = fresnel_schlick(max(dot(Nn, V), 0.0), F0);
+    let kS = F_ibl; // fresnel for IBL
+    let kD = (vec3<f32>(1.0, 1.0, 1.0) - kS) * (1.0 - metallic);
+    // Diffuse from irradiance cube
+    let env_d = textureSample(tex_irradiance, samp_irradiance, Nn).rgb;
+    let ibl_diffuse = kD * base * env_d / 3.14159265;
+    // Specular from prefiltered environment (LOD ~= roughness)
+    let Rv = normalize(reflect(-V, Nn));
+    let max_lod = max(lighting.counts_pad.z - 1.0, 0.0);
+    let lod = clamp(roughness * max_lod, 0.0, max_lod);
+    let env_s = textureSampleLevel(tex_prefilter, samp_prefilter, Rv, lod).rgb;
+    let gloss = (1.0 - roughness);
+    let ibl_spec = env_s * F_ibl * (gloss * gloss);
+    let ibl = (ibl_diffuse + ibl_spec) * lighting.viewpos_ambient.w * ao;
+    color = color + ibl;
 
     // Alpha mask (cutout)
-    if (material.alpha_mode == 1u && alpha < material.alpha_cutoff) {
+    if (material.misc.y == 1u && alpha < material.mr_factors.w) {
         discard;
     }
 
     // Emissive
-    let emissive = textureSample(tex_emissive, samp_emissive, uv_em).rgb * material.emissive_factor;
+    let emissive = textureSample(tex_emissive, samp_emissive, uv_em).rgb * material.emissive_occlusion.xyz;
     color += emissive;
+
+    // Debug output modes
+    let mode = u32(lighting.counts_pad.y + 0.5);
+    if (mode != 0u) {
+        // 1: Base Color, 2: Metallic, 3: Roughness, 4: Normal, 5: Occlusion, 6: Emissive, 7: Alpha, 8: TexCoord0, 9: TexCoord1
+        if (mode == 1u) {
+            return vec4<f32>(base, 1.0);
+        } else if (mode == 2u) {
+            return vec4<f32>(vec3<f32>(metallic), 1.0);
+        } else if (mode == 3u) {
+            return vec4<f32>(vec3<f32>(roughness), 1.0);
+        } else if (mode == 4u) {
+            let ncol = 0.5 * (normalize(Nn) + vec3<f32>(1.0, 1.0, 1.0));
+            return vec4<f32>(ncol, 1.0);
+        } else if (mode == 5u) {
+            return vec4<f32>(vec3<f32>(ao), 1.0);
+        } else if (mode == 6u) {
+            return vec4<f32>(emissive, 1.0);
+        } else if (mode == 7u) {
+            return vec4<f32>(vec3<f32>(alpha), 1.0);
+        } else if (mode == 8u) {
+            let uv = fract(uv_base * 8.0);
+            return vec4<f32>(vec3<f32>(uv.x, uv.y, 0.0), 1.0);
+        } else if (mode == 9u) {
+            let uv1 = fract(vec2<f32>(uv1_base.x, uv1_base.y) * 8.0);
+            return vec4<f32>(vec3<f32>(uv1.x, uv1.y, 0.0), 1.0);
+        }
+    }
 
     // Alpha from base color a
     return vec4<f32>(color, alpha);

@@ -2268,6 +2268,7 @@ dependencies = [
  "env_logger",
  "futures",
  "glam",
+ "half",
  "image",
  "indicatif",
  "log",

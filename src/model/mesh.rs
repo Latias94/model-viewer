@@ -44,6 +44,7 @@ pub struct Mesh {
     pub model_matrix: glam::Mat4,
     pub two_sided: bool,
     pub blend_mode: Option<asset_importer::material::BlendMode>,
+    pub opaque_transparent: bool,
 }
 
 impl Mesh {
@@ -58,6 +59,7 @@ impl Mesh {
         model_matrix: glam::Mat4,
         two_sided: bool,
         blend_mode: Option<asset_importer::material::BlendMode>,
+        opaque_transparent: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
@@ -82,6 +84,7 @@ impl Mesh {
             model_matrix,
             two_sided,
             blend_mode,
+            opaque_transparent,
         })
     }
 

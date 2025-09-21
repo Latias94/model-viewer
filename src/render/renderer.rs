@@ -1,7 +1,18 @@
 use std::sync::Arc;
 use winit::{dpi::PhysicalSize, window::Window};
 
-use crate::{camera::Camera, model::Model, render::ModelRenderPipeline, ui::Ui};
+use crate::{
+    camera::Camera,
+    model::Model,
+    render::{
+        ModelRenderPipeline,
+        passes::{
+            PassCtx, RenderPassExec, opaque::OpaquePass, transparent::TransparentPass,
+            two_sided::TwoSidedPass,
+        },
+    },
+    ui::Ui,
+};
 
 pub struct Renderer {
     pub surface: wgpu::Surface<'static>,
@@ -173,6 +184,7 @@ impl Renderer {
             ui.enable_lighting(),
             ui.light_intensity(),
             scene_lights,
+            ui.output_mode(),
         );
 
         let output = match self.surface.get_current_texture() {
@@ -200,88 +212,93 @@ impl Renderer {
                 label: Some("Render Encoder"),
             });
 
-        // Render 3D scene
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.background),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
+        // Multi-pass forward rendering
+        if let Some(model) = &self.model {
+            // 更新 UBO（包含多光源），并执行分 Pass 渲染
+            let scene_lights = Some(model.lights.as_slice());
+            self.pipeline.update_uniforms(
+                camera,
+                &self.config,
+                &self.queue,
+                ui.enable_lighting(),
+                ui.light_intensity(),
+                scene_lights,
+                ui.output_mode(),
+            );
 
-            // Default pipeline; will adjust per-mesh (normals/wireframe overrides per-frame)
-            let use_normals_global = ui.show_normals();
-            let use_wireframe_global = ui.show_wireframe() && self.wireframe_supported;
-            if use_normals_global {
-                render_pass.set_pipeline(&self.pipeline.pipeline_normals);
-            } else if use_wireframe_global {
-                if let Some(wire) = &self.pipeline.pipeline_wireframe {
-                    render_pass.set_pipeline(wire);
-                } else {
-                    render_pass.set_pipeline(&self.pipeline.pipeline_solid);
-                }
-            } else {
-                render_pass.set_pipeline(&self.pipeline.pipeline_solid);
-            }
-            render_pass.set_bind_group(0, &self.pipeline.uniform_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.pipeline.lighting_bind_group, &[]);
-            // Render model with material if available
-            if let Some(model) = &self.model {
+            let mut ctx = PassCtx {
+                device: &self.device,
+                queue: &self.queue,
+                encoder: &mut encoder,
+                view: &view,
+                depth_view: &self.depth_view,
+            };
+            if ui.show_normals() {
+                // 法线可视化单 pass
+                let mut rpass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Normals Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: ctx.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(self.background),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: ctx.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                rpass.set_pipeline(&self.pipeline.pipeline_normals);
+                rpass.set_bind_group(0, &self.pipeline.uniform_bind_group, &[]);
+                rpass.set_bind_group(1, &self.pipeline.lighting_bind_group, &[]);
+                rpass.set_bind_group(3, &self.pipeline.environment_bind_group, &[]);
                 for mesh in &model.meshes {
-                    // If not in normals/wireframe debug, choose material-specific pipeline
-                    if !use_normals_global && !use_wireframe_global {
-                        let alpha = matches!(
-                            mesh.blend_mode,
-                            Some(
-                                asset_importer::material::BlendMode::Default
-                                    | asset_importer::material::BlendMode::Additive
-                            )
-                        );
-                        let two = mesh.two_sided;
-                        if alpha && two {
-                            render_pass.set_pipeline(&self.pipeline.pipeline_alpha_double);
-                        } else if alpha {
-                            render_pass.set_pipeline(&self.pipeline.pipeline_alpha);
-                        } else if two {
-                            render_pass.set_pipeline(&self.pipeline.pipeline_solid_double);
-                        } else {
-                            render_pass.set_pipeline(&self.pipeline.pipeline_solid);
-                        }
-                    }
                     if let Some(bg) = &mesh.material_bind_group {
-                        render_pass.set_bind_group(2, bg, &[]);
+                        rpass.set_bind_group(2, bg, &[]);
                     }
-                    // Update per-mesh model matrix
+                    // Update per-mesh model & normal matrices for normals visualization
                     let model_mat = mesh.model_matrix;
-                    let normal_mat = glam::Mat4::from_mat3(
-                        glam::Mat3::from_mat4(model_mat).inverse().transpose(),
-                    );
-                    // update uniforms' model and normal_matrix
-                    let mut uniforms = self.pipeline.uniforms;
-                    uniforms.model = model_mat.to_cols_array_2d();
-                    uniforms.normal_matrix = normal_mat.to_cols_array_2d();
+                    let normal_mat = model_mat.inverse().transpose();
+                    let mut u = self.pipeline.uniforms;
+                    u.model = model_mat.to_cols_array_2d();
+                    u.normal_matrix = normal_mat.to_cols_array_2d();
                     self.queue.write_buffer(
                         &self.pipeline.uniform_buffer,
                         0,
-                        bytemuck::cast_slice(&[uniforms]),
+                        bytemuck::cast_slice(&[u]),
                     );
-                    mesh.render(&mut render_pass);
+                    mesh.render(&mut rpass);
                 }
+                drop(rpass);
+            } else {
+                // Skybox first
+                crate::render::passes::skybox::SkyboxPass.draw(
+                    &mut ctx,
+                    &self.pipeline,
+                    model,
+                    camera,
+                    Some(self.background),
+                );
+                // Geometry
+                OpaquePass.draw(&mut ctx, &self.pipeline, model, camera, None);
+                TwoSidedPass.draw(&mut ctx, &self.pipeline, model, camera, None);
+                // Nearly-opaque alpha materials without sorting
+                crate::render::passes::opaque_transparent::OpaqueTransparentPass.draw(
+                    &mut ctx,
+                    &self.pipeline,
+                    model,
+                    camera,
+                    None,
+                );
+                TransparentPass.draw(&mut ctx, &self.pipeline, model, camera, None);
             }
         }
 

@@ -1,3 +1,5 @@
+pub mod environment;
+pub mod passes;
 pub mod pipeline;
 pub mod renderer;
 pub mod texture;
