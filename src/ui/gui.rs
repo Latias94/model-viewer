@@ -17,6 +17,8 @@ pub struct Ui {
     pending_open_path: Option<String>,
     orbit_mode: bool,
     last_open_dir: Option<std::path::PathBuf>,
+    alpha_mask: bool,
+    alpha_cutoff: f32,
 }
 
 impl Ui {
@@ -51,6 +53,8 @@ impl Ui {
             pending_open_path: None,
             orbit_mode: false,
             last_open_dir: initial_dir,
+            alpha_mask: false,
+            alpha_cutoff: 0.5,
         }
     }
 
@@ -120,6 +124,13 @@ impl Ui {
                             ui.add(
                                 egui::Slider::new(&mut light_intensity, 0.0..=3.0)
                                     .text("Light intensity"),
+                            );
+                            ui.separator();
+                            ui.checkbox(&mut self.alpha_mask, "Alpha mask (cutout)");
+                            ui.add_enabled(
+                                self.alpha_mask,
+                                egui::Slider::new(&mut self.alpha_cutoff, 0.0..=1.0)
+                                    .text("Alpha cutoff"),
                             );
                         });
 
@@ -253,4 +264,7 @@ impl Ui {
     pub fn orbit_mode(&self) -> bool {
         self.orbit_mode
     }
+
+    pub fn alpha_mask_enabled(&self) -> bool { self.alpha_mask }
+    pub fn alpha_cutoff(&self) -> f32 { self.alpha_cutoff }
 }

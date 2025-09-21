@@ -44,6 +44,9 @@ pub struct LightingData {
     pub ambient_strength: f32,
     pub lighting_intensity: f32,
     pub _padding3: [f32; 3],
+    pub alpha_cutoff: f32,
+    pub alpha_mode: u32,
+    pub _padding4: [u32; 2],
 }
 
 #[repr(C)]
@@ -83,6 +86,9 @@ impl Default for LightingData {
             ambient_strength: 0.3,
             lighting_intensity: 1.0,
             _padding3: [0.0; 3],
+            alpha_cutoff: 0.5,
+            alpha_mode: 0,
+            _padding4: [0; 2],
         }
     }
 }
@@ -405,6 +411,8 @@ impl ModelRenderPipeline {
         queue: &wgpu::Queue,
         lighting_enabled: bool,
         light_intensity: f32,
+        alpha_mask: bool,
+        alpha_cutoff: f32,
     ) {
         self.uniforms.update_view_proj(camera, config);
         self.lighting_data.view_position = camera.position.to_array();
@@ -415,6 +423,8 @@ impl ModelRenderPipeline {
             self.lighting_data.ambient_strength = 1.0;
             self.lighting_data.lighting_intensity = 0.0;
         }
+        self.lighting_data.alpha_mode = if alpha_mask { 1 } else { 0 };
+        self.lighting_data.alpha_cutoff = alpha_cutoff;
 
         queue.write_buffer(
             &self.uniform_buffer,

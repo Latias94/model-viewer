@@ -65,6 +65,8 @@ struct LightingData {
     view_position: vec3<f32>,
     ambient_strength: f32,
     lighting_intensity: f32,
+    alpha_cutoff: f32,
+    alpha_mode: u32,
 }
 
 @group(1) @binding(0)
@@ -118,7 +120,9 @@ fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f
 @fragment
 fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     // Sample base color (sRGB -> linear handled by texture format)
-    let base = textureSample(tex_base_color, samp_base_color, input.tex_coords).rgb * material.base_color_factor.rgb;
+    let base_sample = textureSample(tex_base_color, samp_base_color, input.tex_coords);
+    let base = base_sample.rgb * material.base_color_factor.rgb;
+    let alpha = base_sample.a * material.base_color_factor.a;
 
     // Metallic-Roughness (linear)
     let mr = textureSample(tex_metal_rough, samp_metal_rough, input.tex_coords).rgb;
@@ -163,12 +167,16 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
     let ambient = lighting.ambient_strength * base;
     color = ambient * ao + color * lighting.lighting_intensity;
 
+    // Alpha mask (cutout)
+    if (lighting.alpha_mode != 0u && alpha < lighting.alpha_cutoff) {
+        discard;
+    }
+
     // Emissive
     let emissive = textureSample(tex_emissive, samp_emissive, input.tex_coords).rgb * material.emissive_factor;
     color += emissive;
 
     // Alpha from base color a
-    let alpha = textureSample(tex_base_color, samp_base_color, input.tex_coords).a * material.base_color_factor.a;
     return vec4<f32>(color, alpha);
 }
 
