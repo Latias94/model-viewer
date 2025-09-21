@@ -1,0 +1,78 @@
+use clap::Parser;
+use model_viewer::App;
+use winit::event_loop::EventLoop;
+
+#[derive(Parser)]
+#[command(name = "model-viewer")]
+#[command(about = "A 3D model viewer using Rust, wgpu, winit, and assimp")]
+#[command(version = "0.1.0")]
+struct Args {
+    /// Path to the 3D model file to load
+    #[arg(value_name = "MODEL_PATH")]
+    model: Option<String>,
+
+    /// Enable verbose logging
+    #[arg(short, long)]
+    verbose: bool,
+
+    /// Window width
+    #[arg(long, default_value = "800")]
+    width: u32,
+
+    /// Window height
+    #[arg(long, default_value = "600")]
+    height: u32,
+
+    /// Enable wireframe mode
+    #[arg(short, long)]
+    wireframe: bool,
+
+    /// Background color (hex format, e.g., #000000)
+    #[arg(long, default_value = "#202020")]
+    background: String,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
+    // Initialize logging
+    if args.verbose {
+        env_logger::Builder::from_default_env()
+            .filter_level(log::LevelFilter::Debug)
+            .init();
+    } else {
+        env_logger::Builder::from_default_env()
+            .filter_level(log::LevelFilter::Info)
+            .init();
+    }
+
+    log::info!("🎮 Model Viewer Starting");
+
+    if let Some(ref model_path) = args.model {
+        log::info!("📁 Loading model: {}", model_path);
+
+        // Check if model file exists
+        if !std::path::Path::new(model_path).exists() {
+            log::error!("❌ Model file '{}' does not exist", model_path);
+            std::process::exit(1);
+        }
+    } else {
+        log::info!("🎯 No model specified, starting with empty scene");
+    }
+
+    log::info!("🎯 Controls:");
+    log::info!("   WASD - Move camera");
+    log::info!("   Mouse - Look around");
+    log::info!("   Mouse wheel - Zoom");
+    log::info!("   ESC - Exit");
+
+    // Create event loop and application
+    let event_loop = EventLoop::new()?;
+    let mut app = App::new(args.model, args.background, (args.width, args.height));
+
+    // Run the application
+    event_loop.run_app(&mut app)?;
+
+    log::info!("👋 Model Viewer Exiting");
+    Ok(())
+}

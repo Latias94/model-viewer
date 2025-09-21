@@ -1,0 +1,59 @@
+[package]
+name = "model-viewer"
+version = "0.1.0"
+edition = "2024"
+authors = ["Model Viewer Team"]
+description = "A 3D model viewer using Rust, wgpu, winit, and assimp"
+
+
+[[bin]]
+name = "download-assets"
+path = "src/bin/download_assets.rs"
+
+[dependencies]
+# Window and Event Handling
+winit = { version = "0.30", features = ["rwh_05"] }
+
+# Graphics
+wgpu = { version = "25.0", features = ["webgl"] }
+bytemuck = { version = "1.0", features = ["derive"] }
+
+# Math
+glam = { version = "0.30", features = ["serde"] }
+
+# Model loading (asset-importer)
+asset-importer = { version = "0.4", features = ["prebuilt"] }
+
+# UI (egui)
+egui = "0.32"
+egui-wgpu = "0.32"
+egui-winit = "0.32"
+
+# Image loading
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# Command line argument parsing
+clap = { version = "4.0", features = ["derive"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Async
+pollster = "0.4"
+futures = "0.3"
+
+# Utility
+log = "0.4"
+env_logger = "0.11"
+
+# Download utilities (for download-assets bin)
+reqwest = { version = "0.12", features = ["stream"] }
+tokio = { version = "1.0", features = ["full"] }
+indicatif = "0.18"
+zip = "5"
+rfd = "0.14"
+
+[dev-dependencies]
+# For testing
+approx = "0.5"
