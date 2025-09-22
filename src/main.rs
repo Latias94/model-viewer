@@ -52,15 +52,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Initialize logging
-    if args.verbose {
-        env_logger::Builder::from_default_env()
-            .filter_level(log::LevelFilter::Debug)
-            .init();
-    } else {
-        env_logger::Builder::from_default_env()
-            .filter_level(log::LevelFilter::Info)
-            .init();
+    // - By default, keep our app at Info/Debug, but silence noisy GPU deps to Warn.
+    // - If RUST_LOG is set, respect it entirely (no overrides here).
+    let rust_log_set = std::env::var("RUST_LOG").is_ok();
+    let mut builder = env_logger::Builder::from_default_env();
+    if !rust_log_set {
+        // App-wide default level
+        if args.verbose {
+            builder.filter_level(log::LevelFilter::Debug);
+        } else {
+            builder.filter_level(log::LevelFilter::Info);
+        }
+
+        // Turn down wgpu and related crates by default
+        builder
+            .filter_module("wgpu", log::LevelFilter::Warn)
+            .filter_module("wgpu_core", log::LevelFilter::Warn)
+            .filter_module("wgpu_hal", log::LevelFilter::Warn)
+            .filter_module("naga", log::LevelFilter::Warn);
     }
+    builder.init();
 
     log::info!("🎮 Model Viewer Starting");
 

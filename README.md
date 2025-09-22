@@ -2,7 +2,9 @@
 
 This is a small model viewer built on top of the Assimp Rust binding [asset-importer](https://github.com/Latias94/asset-importer). It serves as a practical sample and a testbed to validate asset-importer across common formats.
 
-![screenshot](screenshots/helmet.png)
+![helmet](screenshots/helmet.png)
+
+![fox](screenshots/fox.gif)
 
 ## Highlights
 

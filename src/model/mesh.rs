@@ -57,6 +57,7 @@ pub struct Mesh {
     pub bone_offset_mats: Vec<glam::Mat4>,
     pub skin_buffer: Option<wgpu::Buffer>,
     pub mesh_node_index: usize,
+    pub prev_skin_mats: Option<Vec<glam::Mat4>>,
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +122,7 @@ impl Mesh {
             bone_offset_mats,
             skin_buffer,
             mesh_node_index,
+            prev_skin_mats: None,
         })
     }
 

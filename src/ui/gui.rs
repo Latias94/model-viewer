@@ -20,6 +20,20 @@ pub struct Ui {
     alpha_mask: bool,
     alpha_cutoff: f32,
     output_mode_index: usize,
+    // Animation & transform controls
+    freeze_root_motion: bool,
+    orientation_index: usize,
+    skin_space_index: usize,
+    freeze_skin_owner: bool,
+    normalize_model: bool,
+    root_motion_preset_index: usize,
+    // View & camera controls
+    exposure: f32,
+    camera_speed: f32,
+    pending_reset_camera: bool,
+    // Environment debug
+    env_debug_index: usize,
+    env_debug_lod: f32,
 }
 
 impl Ui {
@@ -57,6 +71,17 @@ impl Ui {
             alpha_mask: false,
             alpha_cutoff: 0.5,
             output_mode_index: 0,
+            freeze_root_motion: true,
+            orientation_index: 0,
+            skin_space_index: 1,
+            freeze_skin_owner: true,
+            normalize_model: true,
+            root_motion_preset_index: 1, // Fixed World (recommended)
+            exposure: 1.0,
+            camera_speed: 2.5,
+            pending_reset_camera: false,
+            env_debug_index: 0,
+            env_debug_lod: 0.0,
         }
     }
 
@@ -153,6 +178,71 @@ impl Ui {
                     }
 
                     ui.separator();
+                    egui::CollapsingHeader::new("Transform")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            // Presets
+                            let presets = [
+                                "Custom",
+                                "Fixed World (recommended)",
+                                "Default (root motion)",
+                            ];
+                            let prev_preset = self.root_motion_preset_index;
+                            egui::ComboBox::from_label("Root Motion Preset")
+                                .selected_text(presets[self.root_motion_preset_index])
+                                .show_ui(ui, |ui| {
+                                    for (i, label) in presets.iter().enumerate() {
+                                        ui.selectable_value(&mut self.root_motion_preset_index, i, *label);
+                                    }
+                                });
+                            if self.root_motion_preset_index != prev_preset {
+                                match self.root_motion_preset_index {
+                                    1 => {
+                                        // Fixed World
+                                        self.freeze_root_motion = true;
+                                        self.freeze_skin_owner = true;
+                                        self.skin_space_index = 1;
+                                        self.normalize_model = true;
+                                    }
+                                    2 => {
+                                        // Default
+                                        self.freeze_root_motion = false;
+                                        self.freeze_skin_owner = false;
+                                        self.skin_space_index = 0;
+                                        self.normalize_model = false;
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            ui.checkbox(&mut self.freeze_root_motion, "Freeze root motion");
+                            ui.checkbox(&mut self.freeze_skin_owner, "Freeze skin owner translation");
+                            ui.checkbox(&mut self.normalize_model, "Normalize model to unit cube");
+                            let spaces = [
+                                "Skin Space: Mesh-Local",
+                                "Skin Space: Root (LOGL)",
+                            ];
+                            egui::ComboBox::from_label("Skin Space")
+                                .selected_text(spaces[self.skin_space_index])
+                                .show_ui(ui, |ui| {
+                                    for (i, label) in spaces.iter().enumerate() {
+                                        ui.selectable_value(&mut self.skin_space_index, i, *label);
+                                    }
+                                });
+                            let orientations = [
+                                "None",
+                                "Rotate X +90°",
+                                "Rotate X -90°",
+                                "Rotate Y 180°",
+                            ];
+                            egui::ComboBox::from_label("Orientation")
+                                .selected_text(orientations[self.orientation_index])
+                                .show_ui(ui, |ui| {
+                                    for (i, label) in orientations.iter().enumerate() {
+                                        ui.selectable_value(&mut self.orientation_index, i, *label);
+                                    }
+                                });
+                        });
                     egui::CollapsingHeader::new("Rendering Options")
                         .default_open(true)
                         .show(ui, |ui| {
@@ -162,6 +252,11 @@ impl Ui {
                             ui.add(
                                 egui::Slider::new(&mut light_intensity, 0.0..=3.0)
                                     .text("Light intensity"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut self.exposure, 0.05..=5.0)
+                                    .logarithmic(true)
+                                    .text("Exposure"),
                             );
                             ui.separator();
                             ui.checkbox(&mut self.alpha_mask, "Alpha mask (cutout)");
@@ -190,6 +285,22 @@ impl Ui {
                                         ui.selectable_value(&mut self.output_mode_index, i, *label);
                                     }
                                 });
+                            ui.separator();
+                            egui::CollapsingHeader::new("Environment Debug")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    const OPTS: [&str; 3] = ["Prefiltered", "Irradiance", "Equirect"];
+                                    egui::ComboBox::from_label("Env Source")
+                                        .selected_text(*OPTS.get(self.env_debug_index.min(2)).unwrap_or(&OPTS[0]))
+                                        .show_ui(ui, |ui| {
+                                            for (i, label) in OPTS.iter().enumerate() {
+                                                ui.selectable_value(&mut self.env_debug_index, i, *label);
+                                            }
+                                        });
+                                    if self.env_debug_index == 0 { // Prefiltered
+                                        ui.add(egui::Slider::new(&mut self.env_debug_lod, 0.0..=10.0).text("Prefilter LOD"));
+                                    }
+                                });
                         });
 
                     ui.separator();
@@ -206,6 +317,14 @@ impl Ui {
                             ui.label(format!("Speed: {:.1}", camera.movement_speed));
                             ui.separator();
                             ui.checkbox(&mut self.orbit_mode, "Orbit camera");
+                            ui.add(
+                                egui::Slider::new(&mut self.camera_speed, 0.1..=20.0)
+                                    .logarithmic(true)
+                                    .text("Move speed"),
+                            );
+                            if ui.button("Reset camera").clicked() {
+                                self.pending_reset_camera = true;
+                            }
                         });
 
                     ui.separator();
@@ -258,9 +377,16 @@ impl Ui {
         self.state
             .handle_platform_output(window, full_output.platform_output);
 
-        let paint_jobs = self
+        let mut paint_jobs = self
             .context
             .tessellate(full_output.shapes, full_output.pixels_per_point);
+        // Guard against invalid zero-area clip rects that trigger wgpu viewport validation
+        paint_jobs.retain(|job| {
+            let rect = job.clip_rect;
+            let w = rect.max.x - rect.min.x;
+            let h = rect.max.y - rect.min.y;
+            w > 0.0 && h > 0.0
+        });
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [window.inner_size().width, window.inner_size().height],
             pixels_per_point: window.scale_factor() as f32,
@@ -332,5 +458,47 @@ impl Ui {
 
     pub fn output_mode(&self) -> u32 {
         self.output_mode_index as u32
+    }
+
+    pub fn freeze_root_motion(&self) -> bool {
+        self.freeze_root_motion
+    }
+
+    pub fn orientation_matrix(&self) -> glam::Mat4 {
+        let deg = std::f32::consts::PI / 180.0;
+        match self.orientation_index {
+            1 => glam::Mat4::from_rotation_x(90.0 * deg),
+            2 => glam::Mat4::from_rotation_x(-90.0 * deg),
+            3 => glam::Mat4::from_rotation_y(180.0 * deg),
+            _ => glam::Mat4::IDENTITY,
+        }
+    }
+
+    pub fn skin_root_space(&self) -> bool {
+        self.skin_space_index == 1
+    }
+
+    pub fn freeze_skin_owner(&self) -> bool {
+        self.freeze_skin_owner
+    }
+    pub fn normalize_model(&self) -> bool {
+        self.normalize_model
+    }
+    pub fn exposure(&self) -> f32 {
+        self.exposure
+    }
+    pub fn camera_speed(&self) -> f32 {
+        self.camera_speed
+    }
+    pub fn take_reset_camera(&mut self) -> bool {
+        let v = self.pending_reset_camera;
+        self.pending_reset_camera = false;
+        v
+    }
+    pub fn env_debug_index(&self) -> usize {
+        self.env_debug_index
+    }
+    pub fn env_debug_lod(&self) -> f32 {
+        self.env_debug_lod
     }
 }

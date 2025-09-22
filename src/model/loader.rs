@@ -51,10 +51,10 @@ impl ModelLoader {
             )
             .import_file(path)?;
 
-        log::info!("Scene loaded successfully!");
-        log::info!("  Meshes: {}", scene.num_meshes());
-        log::info!("  Materials: {}", scene.num_materials());
-        log::info!("  Textures: {}", scene.num_textures());
+        log::debug!("Scene loaded successfully!");
+        log::debug!("  Meshes: {}", scene.num_meshes());
+        log::debug!("  Materials: {}", scene.num_materials());
+        log::debug!("  Textures: {}", scene.num_textures());
 
         let mut model = Model::new();
 
@@ -80,12 +80,12 @@ impl ModelLoader {
                 for ch in anim.channels() {
                     let name = ch.node_name();
                     if let Some(&node_index) = model.name_to_index.get(&name) {
-                        let pos_keys = ch
+                        let mut pos_keys: Vec<(f64, glam::Vec3)> = ch
                             .position_keys()
                             .into_iter()
                             .map(|k| (k.time, glam::vec3(k.value.x, k.value.y, k.value.z)))
                             .collect();
-                        let rot_keys = ch
+                        let mut rot_keys: Vec<(f64, glam::Quat)> = ch
                             .rotation_keys()
                             .into_iter()
                             .map(|k| {
@@ -97,11 +97,53 @@ impl ModelLoader {
                                 )
                             })
                             .collect();
-                        let scl_keys = ch
+                        let mut scl_keys: Vec<(f64, glam::Vec3)> = ch
                             .scaling_keys()
                             .into_iter()
                             .map(|k| (k.time, glam::vec3(k.value.x, k.value.y, k.value.z)))
                             .collect();
+                        // Ensure quaternion continuity (same hemisphere) to avoid flips
+                        if rot_keys.len() > 1 {
+                            let mut prev = rot_keys[0].1;
+                            for i in 1..rot_keys.len() {
+                                let mut q = rot_keys[i].1;
+                                if prev.dot(q) < 0.0 {
+                                    q = -q;
+                                }
+                                rot_keys[i].1 = q.normalize();
+                                prev = q;
+                            }
+                        }
+                        // Append loop keys at duration to avoid a visible jump on wrap
+                        let duration = anim.duration();
+                        if duration > 0.0 {
+                            if let Some(first) = pos_keys.first().map(|v| v.1) {
+                                if let Some(last) = pos_keys.last().map(|v| v.1) {
+                                    if (last - first).length() > 1e-4 {
+                                        pos_keys.push((duration, first));
+                                    }
+                                }
+                            }
+                            if let Some(first) = scl_keys.first().map(|v| v.1) {
+                                if let Some(last) = scl_keys.last().map(|v| v.1) {
+                                    if (last - first).length() > 1e-4 {
+                                        scl_keys.push((duration, first));
+                                    }
+                                }
+                            }
+                            if let Some(first) = rot_keys.first().map(|v| v.1) {
+                                if let Some(last) = rot_keys.last().map(|v| v.1) {
+                                    let mut loop_q = first;
+                                    if last.dot(loop_q) < 0.0 {
+                                        loop_q = -loop_q;
+                                    }
+                                    if last.dot(loop_q) < 0.999 {
+                                        // not almost equal
+                                        rot_keys.push((duration, loop_q.normalize()));
+                                    }
+                                }
+                            }
+                        }
                         channels.push(crate::model::AnimChannel {
                             node_index,
                             position_keys: pos_keys,
@@ -158,6 +200,37 @@ impl ModelLoader {
             .await?;
         }
 
+        // Compute global normalization transform (unit cube at origin) from bind-pose meshes
+        if !model.meshes.is_empty() {
+            let mut min_v = glam::Vec3::splat(f32::INFINITY);
+            let mut max_v = glam::Vec3::splat(f32::NEG_INFINITY);
+            for mesh in &model.meshes {
+                let m = mesh.model_matrix; // bind-pose global for this mesh
+                for v in &mesh.vertices {
+                    let p = glam::Vec3::new(v.position[0], v.position[1], v.position[2]);
+                    let wp = (m * glam::Vec4::new(p.x, p.y, p.z, 1.0)).truncate();
+                    min_v = min_v.min(wp);
+                    max_v = max_v.max(wp);
+                }
+            }
+            let center = (min_v + max_v) * 0.5;
+            let extent = max_v - min_v;
+            let max_extent = extent.x.max(extent.y.max(extent.z)).max(1e-5);
+            let scale = 1.0 / max_extent; // fit in unit cube
+            let t = glam::Mat4::from_translation(-center);
+            let s = glam::Mat4::from_scale(glam::Vec3::splat(scale));
+            model.global_normalize = s * t;
+            log::info!(
+                "Normalize: center=({:.3},{:.3},{:.3}) extent=({:.3},{:.3},{:.3}) scale={:.5}",
+                center.x,
+                center.y,
+                center.z,
+                extent.x,
+                extent.y,
+                extent.z,
+                scale
+            );
+        }
         // Collect lights from scene (Assimp lights)
         let mut lights: Vec<crate::model::LightInfo> = Vec::new();
         for i in 0..scene.num_lights() {
@@ -346,6 +419,21 @@ impl ModelLoader {
             vertices.push(vertex);
         }
 
+        // Debug: Print first few vertices to check for issues
+
+        for (i, vertex) in vertices.iter().enumerate().take(5) {
+            log::info!(
+                "  Vertex {}: pos=[{:.3}, {:.3}, {:.3}] normal=[{:.3}, {:.3}, {:.3}]",
+                i,
+                vertex.position[0],
+                vertex.position[1],
+                vertex.position[2],
+                vertex.normal[0],
+                vertex.normal[1],
+                vertex.normal[2]
+            );
+        }
+
         // Process indices
         for face in mesh.faces() {
             for &index in face.indices() {
@@ -366,11 +454,11 @@ impl ModelLoader {
             let mut per_vertex: Vec<Vec<(usize, f32)>> = vec![Vec::new(); vertices.len()];
             for (bi, b) in mesh.bones().enumerate() {
                 let name = b.name();
-                let offset = b.offset_matrix();
-                // offset is already a glam::Mat4, no need for conversion
+                let offset = b.offset_matrix().transpose();
+                // Transpose matrices from importer (row-major) to our column-major convention
                 bone_offset_mats.push(offset);
 
-                log::info!("  Bone {}: '{}' offset_matrix:", bi, name);
+                log::debug!("  Bone ...");
                 log::info!(
                     "    [{:8.4}, {:8.4}, {:8.4}, {:8.4}]",
                     offset.x_axis.x,
@@ -402,7 +490,7 @@ impl ModelLoader {
 
                 if let Some(&ni) = model.name_to_index.get(&name) {
                     bone_node_indices.push(ni);
-                    log::info!("    -> Node index: {}", ni);
+                    log::debug!("    -> Node index logged");
                 } else {
                     bone_node_indices.push(0);
                     log::warn!(
@@ -421,8 +509,9 @@ impl ModelLoader {
                 }
             }
             // Normalize weights and assign to vertices
-            log::info!("🎯 Assigning bone weights to {} vertices", vertices.len());
+            log::debug!("Assigning bone weights");
             let mut vertices_with_weights = 0;
+            let mut debug_logged = 0;
             for (i, list) in per_vertex.iter_mut().enumerate() {
                 if list.is_empty() {
                     continue;
@@ -442,10 +531,11 @@ impl ModelLoader {
                         weights[j] /= sum;
                     }
                     vertices_with_weights += 1;
-                    if i < 5 {
-                        // Log first 5 vertices for debugging
+                    if debug_logged < 10 {
+                        // Log first 10 vertices with weights for debugging
+                        debug_logged += 1;
                         log::info!(
-                            "  Vertex {}: joints=[{}, {}, {}, {}] weights=[{:.3}, {:.3}, {:.3}, {:.3}]",
+                            "  ✅ Vertex {}: joints=[{}, {}, {}, {}] weights=[{:.3}, {:.3}, {:.3}, {:.3}] (sum={:.3})",
                             i,
                             joints[0],
                             joints[1],
@@ -454,7 +544,8 @@ impl ModelLoader {
                             weights[0],
                             weights[1],
                             weights[2],
-                            weights[3]
+                            weights[3],
+                            weights.iter().sum::<f32>()
                         );
                     }
                 }
@@ -463,12 +554,19 @@ impl ModelLoader {
             }
             log::info!("  -> {} vertices have bone weights", vertices_with_weights);
             bone_count = bone_node_indices.len() as u32;
-            // Initialize skin buffer with bind-pose matrices using LearnOpenGL standard formula
+            // Initialize skin buffer with bind-pose matrices using LearnOpenGL formula
             let mut mats: Vec<[[f32; 4]; 4]> = Vec::with_capacity(bone_node_indices.len());
             log::info!(
                 "🔧 Computing initial bone matrices for {} bones",
                 bone_count
             );
+
+            // Mesh-global at bind pose, so we can compute mesh-local skin matrices
+            let mesh_bind_global = bind_globals
+                .get(mesh_node_index)
+                .cloned()
+                .unwrap_or(glam::Mat4::IDENTITY);
+            let inv_mesh_bind_global = mesh_bind_global.inverse();
 
             for (bi, &ni) in bone_node_indices.iter().enumerate() {
                 let global_transform = bind_globals
@@ -476,8 +574,8 @@ impl ModelLoader {
                     .cloned()
                     .unwrap_or(glam::Mat4::IDENTITY);
                 let offset_matrix = bone_offset_mats[bi];
-                // Use the standard LearnOpenGL formula: finalBoneMatrix = globalTransformation * offsetMatrix
-                let final_bone_matrix = global_transform * offset_matrix;
+                // Skin matrix in mesh-local coordinates: inv(mesh_bind_global) * global(bone) * offset
+                let final_bone_matrix = inv_mesh_bind_global * global_transform * offset_matrix;
 
                 mats.push(final_bone_matrix.to_cols_array_2d());
             }
@@ -1112,6 +1210,7 @@ impl ModelLoader {
         let nd = crate::model::NodeData {
             name: node.name(),
             parent,
+            // Use importer matrix directly; it matches our expected convention for node transforms
             local_bind: node.transformation(),
         };
         out_nodes.push(nd);

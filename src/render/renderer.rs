@@ -200,11 +200,28 @@ impl Renderer {
         if self.anim_enabled {
             self.anim_time += (delta_time * self.anim_speed).max(0.0);
             if let Some(model) = &mut self.model {
-                model.update_animation(&self.device, &self.queue, self.anim_time);
+                // Query flags from UI (applies next frame when toggled)
+                let freeze = ui.freeze_root_motion();
+                let skin_root = ui.skin_root_space();
+                model.update_animation(
+                    &self.device,
+                    &self.queue,
+                    self.anim_time,
+                    ui.freeze_root_motion(),
+                    ui.skin_root_space(),
+                    ui.freeze_skin_owner(),
+                    ui.normalize_model(),
+                );
             }
         }
         // Apply UI-driven uniforms
+        self.pipeline.exposure = ui.exposure();
         let scene_lights = self.model.as_ref().map(|m| m.lights.as_slice());
+
+        // Apply exposure and env debug from UI
+        self.pipeline.exposure = ui.exposure();
+        self.pipeline.env_debug_mode = ui.env_debug_index() as u32;
+        self.pipeline.env_debug_lod = ui.env_debug_lod();
 
         self.pipeline.update_uniforms(
             camera,
@@ -243,18 +260,6 @@ impl Renderer {
 
         // Multi-pass forward rendering
         if let Some(model) = &self.model {
-            // 更新 UBO（包含多光源），并执行分 Pass 渲染
-            let scene_lights = Some(model.lights.as_slice());
-            self.pipeline.update_uniforms(
-                camera,
-                &self.config,
-                &self.queue,
-                ui.enable_lighting(),
-                ui.light_intensity(),
-                scene_lights,
-                ui.output_mode(),
-            );
-
             let mut ctx = PassCtx {
                 device: &self.device,
                 queue: &self.queue,
@@ -285,6 +290,8 @@ impl Renderer {
                     occlusion_query_set: None,
                     timestamp_writes: None,
                 });
+                // Apply model orientation from UI
+                self.pipeline.model_orientation = ui.orientation_matrix();
                 rpass.set_pipeline(&self.pipeline.pipeline_normals);
                 rpass.set_bind_group(0, &self.pipeline.uniform_bind_group, &[]);
                 rpass.set_bind_group(1, &self.pipeline.lighting_bind_group, &[]);
@@ -296,15 +303,18 @@ impl Renderer {
                     // material group (2) includes skin buffer at binding 11
                     // Update per-mesh model & normal matrices for normals visualization
                     // Use the mesh's model matrix for both skinned and non-skinned meshes
-                    let model_mat = mesh.model_matrix;
+                    let model_mat = self.pipeline.model_orientation * mesh.model_matrix;
                     let normal_mat = model_mat.inverse().transpose();
-                    let mut u = self.pipeline.uniforms;
-                    u.model = model_mat.to_cols_array_2d();
-                    u.normal_matrix = normal_mat.to_cols_array_2d();
+                    // Only update model and normal matrix, preserve view_proj
                     self.queue.write_buffer(
                         &self.pipeline.uniform_buffer,
-                        0,
-                        bytemuck::cast_slice(&[u]),
+                        16 * 4, // Offset to model matrix (skip view_proj which is 16 floats)
+                        bytemuck::cast_slice(&model_mat.to_cols_array_2d()),
+                    );
+                    self.queue.write_buffer(
+                        &self.pipeline.uniform_buffer,
+                        32 * 4, // Offset to normal matrix
+                        bytemuck::cast_slice(&normal_mat.to_cols_array_2d()),
                     );
                     mesh.render(&mut rpass);
                 }
@@ -318,6 +328,8 @@ impl Renderer {
                     camera,
                     Some(self.background),
                 );
+                // Apply model orientation from UI
+                self.pipeline.model_orientation = ui.orientation_matrix();
                 // Geometry
                 OpaquePass.draw(&mut ctx, &self.pipeline, model, camera, None);
                 TwoSidedPass.draw(&mut ctx, &self.pipeline, model, camera, None);

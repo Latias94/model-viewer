@@ -52,14 +52,20 @@ impl RenderPassExec for OpaqueTransparentPass {
             if let Some(bg) = &mesh.material_bind_group {
                 rpass.set_bind_group(2, bg, &[]);
             }
-            // Use the mesh's model matrix for both skinned and non-skinned meshes
-            let model_mat = mesh.model_matrix;
+            // Apply global model orientation correction if any
+            let model_mat = pipeline.model_orientation * mesh.model_matrix;
             let normal_mat = model_mat.inverse().transpose();
-            let mut u = pipeline.uniforms;
-            u.model = model_mat.to_cols_array_2d();
-            u.normal_matrix = normal_mat.to_cols_array_2d();
-            ctx.queue
-                .write_buffer(&pipeline.uniform_buffer, 0, bytemuck::cast_slice(&[u]));
+            // Only update model and normal matrix, preserve view_proj
+            ctx.queue.write_buffer(
+                &pipeline.uniform_buffer,
+                16 * 4, // Offset to model matrix (skip view_proj which is 16 floats)
+                bytemuck::cast_slice(&model_mat.to_cols_array_2d()),
+            );
+            ctx.queue.write_buffer(
+                &pipeline.uniform_buffer,
+                32 * 4, // Offset to normal matrix
+                bytemuck::cast_slice(&normal_mat.to_cols_array_2d()),
+            );
             rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
             rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             rpass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);

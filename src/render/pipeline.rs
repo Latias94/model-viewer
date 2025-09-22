@@ -11,6 +11,7 @@ pub struct Uniforms {
     pub model: [[f32; 4]; 4],
     pub normal_matrix: [[f32; 4]; 4],
     pub view_proj_inv: [[f32; 4]; 4],
+    pub env_debug: [f32; 4],
 }
 
 impl Uniforms {
@@ -20,6 +21,7 @@ impl Uniforms {
             model: Mat4::IDENTITY.to_cols_array_2d(),
             normal_matrix: Mat4::IDENTITY.to_cols_array_2d(),
             view_proj_inv: Mat4::IDENTITY.to_cols_array_2d(),
+            env_debug: [0.0; 4],
         }
     }
 
@@ -123,6 +125,10 @@ pub struct ModelRenderPipeline {
     pub uniforms: Uniforms,
     pub lighting_data: LightingData,
     pub exposure: f32,
+    pub frame_index: u64,
+    pub model_orientation: glam::Mat4,
+    pub env_debug_mode: u32,
+    pub env_debug_lod: f32,
 }
 
 impl ModelRenderPipeline {
@@ -357,6 +363,23 @@ impl ModelRenderPipeline {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // equirect 2D + sampler (debug)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             });
 
@@ -579,6 +602,14 @@ impl ModelRenderPipeline {
                     binding: 5,
                     resource: wgpu::BindingResource::Sampler(&environment.brdf_lut_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&environment.equirect_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(&environment.equirect_sampler),
+                },
             ],
         });
 
@@ -605,6 +636,10 @@ impl ModelRenderPipeline {
             uniforms,
             lighting_data,
             exposure: 1.0,
+            frame_index: 0,
+            model_orientation: glam::Mat4::IDENTITY,
+            env_debug_mode: 0,
+            env_debug_lod: 0.0,
         }
     }
 
@@ -618,7 +653,59 @@ impl ModelRenderPipeline {
         scene_lights: Option<&[crate::model::LightInfo]>,
         output_mode: u32,
     ) {
+        // Update uniforms
         self.uniforms.update_view_proj(camera, config);
+        // Increment frame index
+        self.frame_index = self.frame_index.wrapping_add(1);
+        // Pass environment debug parameters
+        self.uniforms.env_debug = [self.env_debug_mode as f32, self.env_debug_lod, 0.0, 0.0];
+        // Debug: Log camera and VP for first few frames
+        if false && self.frame_index <= 60 {
+            let view = camera.view_matrix();
+            let proj = glam::Mat4::perspective_rh(
+                camera.zoom.to_radians(),
+                config.width as f32 / config.height as f32,
+                0.1,
+                100.0,
+            );
+            let vp = proj * view;
+            let r = |m: &glam::Mat4, i: usize| -> (f32, f32, f32, f32) {
+                (m.x_axis[i], m.y_axis[i], m.z_axis[i], m.w_axis[i])
+            };
+            let (r0x, r0y, r0z, r0w) = r(&vp, 0);
+            let (r1x, r1y, r1z, r1w) = r(&vp, 1);
+            let (r2x, r2y, r2z, r2w) = r(&vp, 2);
+            let (r3x, r3y, r3z, r3w) = r(&vp, 3);
+            log::info!(
+                "UBO frame {}: cam=({:.3},{:.3},{:.3}) front=({:.3},{:.3},{:.3})",
+                self.frame_index,
+                camera.position.x,
+                camera.position.y,
+                camera.position.z,
+                camera.front.x,
+                camera.front.y,
+                camera.front.z
+            );
+            log::info!(
+                "  VP rows:\n    [{:7.4}, {:7.4}, {:7.4}, {:7.4}]\n    [{:7.4}, {:7.4}, {:7.4}, {:7.4}]\n    [{:7.4}, {:7.4}, {:7.4}, {:7.4}]\n    [{:7.4}, {:7.4}, {:7.4}, {:7.4}]",
+                r0x,
+                r0y,
+                r0z,
+                r0w,
+                r1x,
+                r1y,
+                r1z,
+                r1w,
+                r2x,
+                r2y,
+                r2z,
+                r2w,
+                r3x,
+                r3y,
+                r3z,
+                r3w
+            );
+        }
         self.lighting_data.viewpos_ambient = [
             camera.position.x,
             camera.position.y,

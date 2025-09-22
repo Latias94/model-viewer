@@ -27,6 +27,7 @@ struct Uniforms {
     model: mat4x4<f32>,
     normal_matrix: mat4x4<f32>,
     view_proj_inv: mat4x4<f32>,
+    env_debug: vec4<f32>, // x: mode (unused in PBR), y: lod
 }
 
 @group(0) @binding(0)
@@ -74,15 +75,15 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     out.world_position = world_position.xyz;
     out.clip_position = uniforms.view_proj * world_position;
 
-    // Transform normal to world space
-    out.world_normal = normalize((uniforms.model * local_normal).xyz);
+    // Transform normal to world space using normal matrix
+    out.world_normal = normalize((uniforms.normal_matrix * local_normal).xyz);
 
     out.tex_coords = input.tex_coords;
     out.tex_coords1 = input.tex_coords1;
     out.color = input.color;
 
-    // Transform tangent to world space
-    out.world_tangent = normalize((uniforms.model * local_tangent).xyz);
+    // Transform tangent to world space using normal matrix
+    out.world_tangent = normalize((uniforms.normal_matrix * local_tangent).xyz);
     out.tangent_sign = input.tangent.w;
 
     return out;

@@ -143,6 +143,11 @@ impl App {
                 self.fps,
                 self.frame_time_ms,
             )?;
+            // Apply camera updates from UI
+            self.camera.movement_speed = ui.camera_speed();
+            if ui.take_reset_camera() {
+                self.camera = Camera::new();
+            }
         }
 
         Ok(())
