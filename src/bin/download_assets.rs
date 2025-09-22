@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 
 const GLTF_SAMPLE_ASSETS_URL: &str =
     "https://github.com/KhronosGroup/glTF-Sample-Assets/archive/refs/heads/main.zip";
+// CC0 HDRI from Poly Haven (1k, EXR)
+const IBL_EXR_URL: &str =
+    "https://dl.polyhaven.org/file/ph-assets/HDRIs/exr/1k/venice_sunset_1k.exr";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -18,9 +21,24 @@ async fn main() -> Result<()> {
     let assets_dir = get_assets_directory()?;
     let zip_path = assets_dir.join("gltf-sample-assets.zip");
     let extract_dir = assets_dir.join("glTF-Sample-Assets-main");
+    let ibl_dir = assets_dir.join("ibl");
+    let ibl_exr_path = ibl_dir.join("venice_sunset_1k.exr");
 
     // Create assets directory if it doesn't exist
     fs::create_dir_all(&assets_dir).context("Failed to create assets directory")?;
+
+    // Ensure IBL dir exists and environment present (skip if already there)
+    std::fs::create_dir_all(&ibl_dir).ok();
+    if !ibl_exr_path.exists() {
+        println!(
+            "☀️  Downloading IBL (venice_sunset_1k.exr) to {}",
+            ibl_exr_path.display()
+        );
+        download_with_resume_to(&ibl_exr_path, IBL_EXR_URL).await?;
+        println!("✅ IBL saved: {}", ibl_exr_path.display());
+    } else {
+        println!("✅ IBL already exists: {}", ibl_exr_path.display());
+    }
 
     // Check if already extracted
     if extract_dir.exists() {
@@ -89,6 +107,105 @@ async fn download_with_resume(zip_path: &Path) -> Result<()> {
     }
 
     unreachable!()
+}
+
+async fn download_with_resume_to(dest_path: &Path, url: &str) -> Result<()> {
+    const MAX_RETRIES: usize = 3;
+    const RETRY_DELAY_SECS: u64 = 2;
+
+    for attempt in 1..=MAX_RETRIES {
+        match download_attempt_to(dest_path, url, attempt).await {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < MAX_RETRIES => {
+                println!("⚠️  Download attempt {} failed: {}", attempt, e);
+                println!("🔄 Retrying in {} seconds...", RETRY_DELAY_SECS);
+                tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY_SECS)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+
+async fn download_attempt_to(dest_path: &Path, url: &str, attempt: usize) -> Result<()> {
+    let client = Client::builder()
+        .timeout(tokio::time::Duration::from_secs(300))
+        .build()
+        .context("Failed to create HTTP client")?;
+
+    let mut start_pos = 0u64;
+    if dest_path.exists() {
+        start_pos = dest_path
+            .metadata()
+            .context("Failed to get file metadata")?
+            .len();
+        if attempt == 1 {
+            println!(
+                "📄 Found partial download, resuming from byte {}",
+                start_pos
+            );
+        }
+    }
+
+    let head_response = client
+        .head(url)
+        .send()
+        .await
+        .context("Failed to get file info")?;
+    let total_size = head_response
+        .headers()
+        .get("content-length")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    if start_pos >= total_size && total_size > 0 {
+        println!("✅ File already fully downloaded");
+        return Ok(());
+    }
+
+    let progress = ProgressBar::new(total_size);
+    progress.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+            .unwrap()
+            .progress_chars("#>-")
+    );
+    progress.set_position(start_pos);
+    if attempt > 1 {
+        progress.set_message(format!("Attempt {}", attempt));
+    }
+
+    let mut request = client.get(url);
+    if start_pos > 0 {
+        request = request.header("Range", format!("bytes={}-", start_pos));
+    }
+    let response = request.send().await.context("Failed to start download")?;
+    if !response.status().is_success() && response.status().as_u16() != 206 {
+        anyhow::bail!("Download failed with status: {}", response.status());
+    }
+
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    let mut file = if start_pos > 0 {
+        File::options()
+            .append(true)
+            .open(dest_path)
+            .context("Failed to open file for resume")?
+    } else {
+        File::create(dest_path).context("Failed to create file")?
+    };
+
+    let mut stream = response.bytes_stream();
+    use futures::StreamExt;
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.context("Failed to read chunk")?;
+        file.write_all(&chunk).context("Failed to write chunk")?;
+        progress.inc(chunk.len() as u64);
+    }
+    progress.finish_with_message("Download completed!");
+    Ok(())
 }
 
 async fn download_attempt(zip_path: &Path, attempt: usize) -> Result<()> {

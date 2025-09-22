@@ -52,6 +52,7 @@ impl RenderPassExec for OpaqueTransparentPass {
             if let Some(bg) = &mesh.material_bind_group {
                 rpass.set_bind_group(2, bg, &[]);
             }
+            // Use the mesh's model matrix for both skinned and non-skinned meshes
             let model_mat = mesh.model_matrix;
             let normal_mat = model_mat.inverse().transpose();
             let mut u = pipeline.uniforms;

@@ -26,12 +26,20 @@ pub struct Renderer {
     pub pipeline: ModelRenderPipeline,
     pub background: wgpu::Color,
     pub wireframe_supported: bool,
+    pub anim_time: f32,
+    pub anim_enabled: bool,
+    pub anim_speed: f32,
+    pub anim_index: usize,
 }
 
 impl Renderer {
     pub async fn new(
         window: Arc<Window>,
         model_path: Option<String>,
+        anim_enabled: bool,
+        anim_index: usize,
+        anim_speed: f32,
+        exposure: f32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let size = window.inner_size();
 
@@ -121,11 +129,21 @@ impl Renderer {
         let (depth_texture, depth_view) = Self::create_depth_texture(&device, &config);
 
         // Create render pipeline
-        let pipeline = ModelRenderPipeline::new(&device, &queue, &config, wireframe_supported);
+        let mut pipeline = ModelRenderPipeline::new(&device, &queue, &config, wireframe_supported);
+        pipeline.exposure = exposure;
 
         // Load model if path is provided
         let model = if let Some(path) = model_path {
-            Some(Model::load(&device, &queue, &path, &pipeline.material_bind_group_layout).await?)
+            Some(
+                Model::load(
+                    &device,
+                    &queue,
+                    &path,
+                    &pipeline.material_bind_group_layout,
+                    anim_index,
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -147,6 +165,10 @@ impl Renderer {
                 a: 1.0,
             },
             wireframe_supported,
+            anim_time: 0.0,
+            anim_enabled,
+            anim_speed,
+            anim_index,
         })
     }
 
@@ -174,6 +196,13 @@ impl Renderer {
         fps: f32,
         frame_time_ms: f32,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Advance animation time and update skinning buffers if any
+        if self.anim_enabled {
+            self.anim_time += (delta_time * self.anim_speed).max(0.0);
+            if let Some(model) = &mut self.model {
+                model.update_animation(&self.device, &self.queue, self.anim_time);
+            }
+        }
         // Apply UI-driven uniforms
         let scene_lights = self.model.as_ref().map(|m| m.lights.as_slice());
 
@@ -264,7 +293,9 @@ impl Renderer {
                     if let Some(bg) = &mesh.material_bind_group {
                         rpass.set_bind_group(2, bg, &[]);
                     }
+                    // material group (2) includes skin buffer at binding 11
                     // Update per-mesh model & normal matrices for normals visualization
+                    // Use the mesh's model matrix for both skinned and non-skinned meshes
                     let model_mat = mesh.model_matrix;
                     let normal_mat = model_mat.inverse().transpose();
                     let mut u = self.pipeline.uniforms;
@@ -335,6 +366,7 @@ impl Renderer {
             &self.queue,
             path,
             &self.pipeline.material_bind_group_layout,
+            self.anim_index,
         ))?;
         self.model = Some(model);
         Ok(())

@@ -36,6 +36,7 @@ impl ModelLoader {
         queue: &wgpu::Queue,
         path: &str,
         material_bind_group_layout: &wgpu::BindGroupLayout,
+        anim_index: usize,
     ) -> Result<Model, Box<dyn std::error::Error>> {
         log::info!("Loading model: {}", path);
 
@@ -57,6 +58,90 @@ impl ModelLoader {
 
         let mut model = Model::new();
 
+        // Build node hierarchy
+        if let Some(root_node) = scene.root_node() {
+            let mut nodes = Vec::new();
+            let mut map = std::collections::HashMap::new();
+            Self::collect_nodes(&root_node, None, &mut nodes, &mut map);
+            // store in model
+            model.name_to_index = map;
+            model.nodes = nodes;
+        }
+
+        // Build animation (first clip)
+        if scene.num_animations() > 0 {
+            let pick = if anim_index < scene.num_animations() {
+                anim_index
+            } else {
+                0
+            };
+            if let Some(anim) = scene.animation(pick) {
+                let mut channels = Vec::new();
+                for ch in anim.channels() {
+                    let name = ch.node_name();
+                    if let Some(&node_index) = model.name_to_index.get(&name) {
+                        let pos_keys = ch
+                            .position_keys()
+                            .into_iter()
+                            .map(|k| (k.time, glam::vec3(k.value.x, k.value.y, k.value.z)))
+                            .collect();
+                        let rot_keys = ch
+                            .rotation_keys()
+                            .into_iter()
+                            .map(|k| {
+                                (
+                                    k.time,
+                                    glam::Quat::from_xyzw(
+                                        k.value.x, k.value.y, k.value.z, k.value.w,
+                                    ),
+                                )
+                            })
+                            .collect();
+                        let scl_keys = ch
+                            .scaling_keys()
+                            .into_iter()
+                            .map(|k| (k.time, glam::vec3(k.value.x, k.value.y, k.value.z)))
+                            .collect();
+                        channels.push(crate::model::AnimChannel {
+                            node_index,
+                            position_keys: pos_keys,
+                            rotation_keys: rot_keys,
+                            scaling_keys: scl_keys,
+                        });
+                    }
+                }
+                model.animation = Some(crate::model::AnimationClip {
+                    duration: anim.duration(),
+                    ticks_per_second: anim.ticks_per_second(),
+                    channels,
+                });
+            }
+        }
+
+        // Precompute bind-pose globals and root info
+        let mut globals: Vec<glam::Mat4> = vec![glam::Mat4::IDENTITY; model.nodes.len()];
+        let mut root_index: usize = 0;
+        for (i, n) in model.nodes.iter().enumerate() {
+            if n.parent.is_none() {
+                root_index = i;
+                break;
+            }
+        }
+        for i in 0..model.nodes.len() {
+            if let Some(p) = model.nodes[i].parent {
+                globals[i] = globals[p] * model.nodes[i].local_bind;
+            } else {
+                globals[i] = model.nodes[i].local_bind;
+            }
+        }
+        model.root_index = root_index;
+        model.root_bind_global = globals
+            .get(root_index)
+            .cloned()
+            .unwrap_or(glam::Mat4::IDENTITY);
+        model.global_inverse_root_bind = model.root_bind_global.inverse();
+        model.root_current_global = model.root_bind_global;
+
         if let Some(root_node) = scene.root_node() {
             let root_transform = glam::Mat4::IDENTITY;
             Self::process_node(
@@ -67,6 +152,7 @@ impl ModelLoader {
                 &scene,
                 path,
                 material_bind_group_layout,
+                &globals,
                 root_transform,
             )
             .await?;
@@ -136,11 +222,15 @@ impl ModelLoader {
         scene: &'a asset_importer::scene::Scene,
         base_path: &'a str,
         material_bind_group_layout: &'a wgpu::BindGroupLayout,
+        bind_globals: &'a [glam::Mat4],
         parent_transform: glam::Mat4,
     ) -> futures::future::BoxFuture<'a, Result<(), Box<dyn std::error::Error>>> {
         Box::pin(async move {
             let local = node.transformation();
             let world = parent_transform * local;
+            // current node index in hierarchy
+            let node_name = node.name();
+            let mesh_node_index = *model.name_to_index.get(&node_name).unwrap_or(&0usize);
             // Process all meshes in this node
             for mesh_index in node.mesh_indices() {
                 if let Some(mesh) = scene.mesh(mesh_index) {
@@ -151,6 +241,9 @@ impl ModelLoader {
                         scene,
                         base_path,
                         material_bind_group_layout,
+                        model,
+                        bind_globals,
+                        mesh_node_index,
                         world,
                     )
                     .await?;
@@ -168,6 +261,7 @@ impl ModelLoader {
                     scene,
                     base_path,
                     material_bind_group_layout,
+                    bind_globals,
                     world,
                 )
                 .await?;
@@ -184,6 +278,9 @@ impl ModelLoader {
         scene: &asset_importer::scene::Scene,
         base_path: &str,
         material_bind_group_layout: &wgpu::BindGroupLayout,
+        model: &Model,
+        bind_globals: &[glam::Mat4],
+        mesh_node_index: usize,
         world_transform: glam::Mat4,
     ) -> Result<Mesh, Box<dyn std::error::Error>> {
         let mut vertices = Vec::new();
@@ -243,6 +340,8 @@ impl ModelLoader {
                 } else {
                     [1.0, 1.0, 1.0, 1.0]
                 },
+                joints: [0, 0, 0, 0],
+                weights: [0.0, 0.0, 0.0, 0.0],
             };
             vertices.push(vertex);
         }
@@ -252,6 +351,142 @@ impl ModelLoader {
             for &index in face.indices() {
                 indices.push(index);
             }
+        }
+
+        // Skinning data (build before material so we can bind buffer in material group)
+        let mut bone_count: u32 = 0;
+        let mut bone_node_indices: Vec<usize> = Vec::new();
+        let mut bone_offset_mats: Vec<glam::Mat4> = Vec::new();
+        let mut skin_buffer: Option<wgpu::Buffer> = None;
+        if mesh.has_bones() {
+            log::info!(
+                "🦴 Processing skinned mesh with {} bones",
+                mesh.bones().count()
+            );
+            let mut per_vertex: Vec<Vec<(usize, f32)>> = vec![Vec::new(); vertices.len()];
+            for (bi, b) in mesh.bones().enumerate() {
+                let name = b.name();
+                let offset = b.offset_matrix();
+                // offset is already a glam::Mat4, no need for conversion
+                bone_offset_mats.push(offset);
+
+                log::info!("  Bone {}: '{}' offset_matrix:", bi, name);
+                log::info!(
+                    "    [{:8.4}, {:8.4}, {:8.4}, {:8.4}]",
+                    offset.x_axis.x,
+                    offset.x_axis.y,
+                    offset.x_axis.z,
+                    offset.x_axis.w
+                );
+                log::info!(
+                    "    [{:8.4}, {:8.4}, {:8.4}, {:8.4}]",
+                    offset.y_axis.x,
+                    offset.y_axis.y,
+                    offset.y_axis.z,
+                    offset.y_axis.w
+                );
+                log::info!(
+                    "    [{:8.4}, {:8.4}, {:8.4}, {:8.4}]",
+                    offset.z_axis.x,
+                    offset.z_axis.y,
+                    offset.z_axis.z,
+                    offset.z_axis.w
+                );
+                log::info!(
+                    "    [{:8.4}, {:8.4}, {:8.4}, {:8.4}]",
+                    offset.w_axis.x,
+                    offset.w_axis.y,
+                    offset.w_axis.z,
+                    offset.w_axis.w
+                );
+
+                if let Some(&ni) = model.name_to_index.get(&name) {
+                    bone_node_indices.push(ni);
+                    log::info!("    -> Node index: {}", ni);
+                } else {
+                    bone_node_indices.push(0);
+                    log::warn!(
+                        "    -> Bone '{}' not found in node hierarchy, using root (0)",
+                        name
+                    );
+                }
+
+                let weight_count = b.weights().len();
+                log::info!("    -> {} vertex weights", weight_count);
+                for w in b.weights() {
+                    let vid = w.vertex_id as usize;
+                    if vid < per_vertex.len() {
+                        per_vertex[vid].push((bi, w.weight));
+                    }
+                }
+            }
+            // Normalize weights and assign to vertices
+            log::info!("🎯 Assigning bone weights to {} vertices", vertices.len());
+            let mut vertices_with_weights = 0;
+            for (i, list) in per_vertex.iter_mut().enumerate() {
+                if list.is_empty() {
+                    continue;
+                }
+                list.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let mut joints = [0u32; 4];
+                let mut weights = [0.0f32; 4];
+                let limit = list.len().min(4);
+                let mut sum = 0.0f32;
+                for j in 0..limit {
+                    joints[j] = list[j].0 as u32;
+                    weights[j] = list[j].1;
+                    sum += list[j].1;
+                }
+                if sum > 0.0 {
+                    for j in 0..limit {
+                        weights[j] /= sum;
+                    }
+                    vertices_with_weights += 1;
+                    if i < 5 {
+                        // Log first 5 vertices for debugging
+                        log::info!(
+                            "  Vertex {}: joints=[{}, {}, {}, {}] weights=[{:.3}, {:.3}, {:.3}, {:.3}]",
+                            i,
+                            joints[0],
+                            joints[1],
+                            joints[2],
+                            joints[3],
+                            weights[0],
+                            weights[1],
+                            weights[2],
+                            weights[3]
+                        );
+                    }
+                }
+                vertices[i].joints = joints;
+                vertices[i].weights = weights;
+            }
+            log::info!("  -> {} vertices have bone weights", vertices_with_weights);
+            bone_count = bone_node_indices.len() as u32;
+            // Initialize skin buffer with bind-pose matrices using LearnOpenGL standard formula
+            let mut mats: Vec<[[f32; 4]; 4]> = Vec::with_capacity(bone_node_indices.len());
+            log::info!(
+                "🔧 Computing initial bone matrices for {} bones",
+                bone_count
+            );
+
+            for (bi, &ni) in bone_node_indices.iter().enumerate() {
+                let global_transform = bind_globals
+                    .get(ni)
+                    .cloned()
+                    .unwrap_or(glam::Mat4::IDENTITY);
+                let offset_matrix = bone_offset_mats[bi];
+                // Use the standard LearnOpenGL formula: finalBoneMatrix = globalTransformation * offsetMatrix
+                let final_bone_matrix = global_transform * offset_matrix;
+
+                mats.push(final_bone_matrix.to_cols_array_2d());
+            }
+            let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("skin_buffer"),
+                contents: bytemuck::cast_slice(&mats),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
+            skin_buffer = Some(buf);
         }
 
         // Load material textures and create bind group
@@ -350,6 +585,22 @@ impl ModelLoader {
                 opaque_transparent = true;
             }
 
+            // Prepare skin buffer binding (kept alive at least during this call)
+            let mut fallback_skin: Option<wgpu::Buffer> = None;
+            let skin_binding = match &skin_buffer {
+                Some(buf) => buf.as_entire_binding(),
+                None => {
+                    let m = glam::Mat4::IDENTITY.to_cols_array_2d();
+                    let fb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("skin_buffer_fallback"),
+                        contents: bytemuck::cast_slice(&[m]),
+                        usage: wgpu::BufferUsages::STORAGE,
+                    });
+                    fallback_skin = Some(fb);
+                    fallback_skin.as_ref().unwrap().as_entire_binding()
+                }
+            };
+
             let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("material_bind_group"),
                 layout: material_bind_group_layout,
@@ -397,6 +648,10 @@ impl ModelLoader {
                     wgpu::BindGroupEntry {
                         binding: 10,
                         resource: params_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: skin_binding,
                     },
                 ],
             });
@@ -457,6 +712,22 @@ impl ModelLoader {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
 
+            // Prepare skin buffer binding for default-material path
+            let mut fallback_skin2: Option<wgpu::Buffer> = None;
+            let skin_binding2 = match &skin_buffer {
+                Some(buf) => buf.as_entire_binding(),
+                None => {
+                    let m = glam::Mat4::IDENTITY.to_cols_array_2d();
+                    let fb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("skin_buffer_fallback"),
+                        contents: bytemuck::cast_slice(&[m]),
+                        usage: wgpu::BufferUsages::STORAGE,
+                    });
+                    fallback_skin2 = Some(fb);
+                    fallback_skin2.as_ref().unwrap().as_entire_binding()
+                }
+            };
+
             let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("material_bind_group"),
                 layout: material_bind_group_layout,
@@ -505,6 +776,10 @@ impl ModelLoader {
                         binding: 10,
                         resource: params_buffer.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: skin_binding2,
+                    },
                 ],
             });
 
@@ -542,6 +817,11 @@ impl ModelLoader {
                 .material(mesh.material_index())
                 .and_then(|m| m.blend_mode()),
             opaque_transparent,
+            bone_count,
+            bone_node_indices,
+            bone_offset_mats,
+            skin_buffer,
+            mesh_node_index,
         )
     }
 
@@ -818,5 +1098,26 @@ impl ModelLoader {
             Some(&format!("texture_{}", path)),
             true,
         )
+    }
+}
+
+impl ModelLoader {
+    fn collect_nodes(
+        node: &asset_importer::node::Node,
+        parent: Option<usize>,
+        out_nodes: &mut Vec<crate::model::NodeData>,
+        out_map: &mut std::collections::HashMap<String, usize>,
+    ) {
+        let idx = out_nodes.len();
+        let nd = crate::model::NodeData {
+            name: node.name(),
+            parent,
+            local_bind: node.transformation(),
+        };
+        out_nodes.push(nd);
+        out_map.insert(node.name(), idx);
+        for child in node.children() {
+            Self::collect_nodes(&child, Some(idx), out_nodes, out_map);
+        }
     }
 }

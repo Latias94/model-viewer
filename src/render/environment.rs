@@ -8,6 +8,7 @@ pub struct Environment {
     pub brdf_lut_tex: wgpu::Texture,
     pub brdf_lut_view: wgpu::TextureView,
     pub brdf_lut_sampler: wgpu::Sampler,
+    pub prefilter_mips: u32,
 }
 
 impl Environment {
@@ -423,6 +424,7 @@ impl Environment {
             brdf_lut_tex,
             brdf_lut_view,
             brdf_lut_sampler,
+            prefilter_mips,
         })
     }
     pub fn create_dummy(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
@@ -604,6 +606,7 @@ impl Environment {
             brdf_lut_tex,
             brdf_lut_view,
             brdf_lut_sampler,
+            prefilter_mips: 1,
         }
     }
 }

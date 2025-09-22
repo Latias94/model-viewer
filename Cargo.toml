@@ -30,7 +30,7 @@ egui-wgpu = "0.32"
 egui-winit = "0.32"
 
 # Image loading
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "hdr"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "hdr", "exr"] }
 half = "2"
 
 # Command line argument parsing

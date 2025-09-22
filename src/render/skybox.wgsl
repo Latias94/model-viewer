@@ -31,6 +31,15 @@ var<uniform> uniforms: Uniforms;
 @group(1) @binding(2) var tex_prefilter: texture_cube<f32>;
 @group(1) @binding(3) var samp_prefilter: sampler;
 
+fn tonemap_aces(x: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 @fragment
 fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
     // Reconstruct world ray direction using inverse(view_proj)
@@ -42,5 +51,6 @@ fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
     let dir = normalize(w1 - w0);
 
     let color = textureSample(tex_prefilter, samp_prefilter, dir).rgb;
-    return vec4<f32>(color, 1.0);
+    let mapped = tonemap_aces(color);
+    return vec4<f32>(mapped, 1.0);
 }

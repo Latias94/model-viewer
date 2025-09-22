@@ -7,6 +7,8 @@ struct VertexInput {
     @location(3) tangent: vec4<f32>,
     @location(4) tex_coords1: vec2<f32>,
     @location(5) color: vec4<f32>,
+    @location(6) joints: vec4<u32>,
+    @location(7) weights: vec4<f32>,
 }
 
 struct VertexOutput {
@@ -30,23 +32,57 @@ struct Uniforms {
 @group(0) @binding(0)
 var<uniform> uniforms: Uniforms;
 
+// Skinning matrices buffer (always bound; non-skinned meshes use identity entries)
+@group(2) @binding(11)
+var<storage, read> skin_matrices: array<mat4x4<f32>>;
+
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
-    let world_position = uniforms.model * vec4<f32>(input.position, 1.0);
+    // Skinning: LearnOpenGL approach
+    var local_position = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    var local_normal = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    var local_tangent = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+
+    let wsum = input.weights.x + input.weights.y + input.weights.z + input.weights.w;
+    if (wsum > 0.0) {
+        // Apply each bone transformation separately and accumulate weighted results
+        local_position += input.weights.x * (skin_matrices[input.joints.x] * vec4<f32>(input.position, 1.0));
+        local_position += input.weights.y * (skin_matrices[input.joints.y] * vec4<f32>(input.position, 1.0));
+        local_position += input.weights.z * (skin_matrices[input.joints.z] * vec4<f32>(input.position, 1.0));
+        local_position += input.weights.w * (skin_matrices[input.joints.w] * vec4<f32>(input.position, 1.0));
+
+        local_normal += input.weights.x * (skin_matrices[input.joints.x] * vec4<f32>(input.normal, 0.0));
+        local_normal += input.weights.y * (skin_matrices[input.joints.y] * vec4<f32>(input.normal, 0.0));
+        local_normal += input.weights.z * (skin_matrices[input.joints.z] * vec4<f32>(input.normal, 0.0));
+        local_normal += input.weights.w * (skin_matrices[input.joints.w] * vec4<f32>(input.normal, 0.0));
+
+        local_tangent += input.weights.x * (skin_matrices[input.joints.x] * vec4<f32>(input.tangent.xyz, 0.0));
+        local_tangent += input.weights.y * (skin_matrices[input.joints.y] * vec4<f32>(input.tangent.xyz, 0.0));
+        local_tangent += input.weights.z * (skin_matrices[input.joints.z] * vec4<f32>(input.tangent.xyz, 0.0));
+        local_tangent += input.weights.w * (skin_matrices[input.joints.w] * vec4<f32>(input.tangent.xyz, 0.0));
+    } else {
+        // No skinning, use original vertex data
+        local_position = vec4<f32>(input.position, 1.0);
+        local_normal = vec4<f32>(input.normal, 0.0);
+        local_tangent = vec4<f32>(input.tangent.xyz, 0.0);
+    }
+
+    // Transform to world space using model matrix
+    let world_position = uniforms.model * local_position;
     out.world_position = world_position.xyz;
     out.clip_position = uniforms.view_proj * world_position;
 
     // Transform normal to world space
-    out.world_normal = (uniforms.normal_matrix * vec4<f32>(input.normal, 0.0)).xyz;
+    out.world_normal = normalize((uniforms.model * local_normal).xyz);
 
     out.tex_coords = input.tex_coords;
     out.tex_coords1 = input.tex_coords1;
     out.color = input.color;
 
     // Transform tangent to world space
-    out.world_tangent = (uniforms.normal_matrix * vec4<f32>(input.tangent.xyz, 0.0)).xyz;
+    out.world_tangent = normalize((uniforms.model * local_tangent).xyz);
     out.tangent_sign = input.tangent.w;
 
     return out;
@@ -73,7 +109,7 @@ struct LightItem {
 
 struct LightingData {
     viewpos_ambient: vec4<f32>,  // view.xyz + ambient
-    counts_pad: vec4<f32>,       // x = light_count
+    counts_pad: vec4<f32>,       // x = light_count, y = output_mode, z = env_mips, w = exposure
     lights: array<LightItem, 8>,
 }
 
@@ -143,6 +179,15 @@ fn sky_env(dir: vec3<f32>) -> vec3<f32> {
     let top = vec3<f32>(0.05, 0.08, 0.13);
     let bottom = vec3<f32>(0.2, 0.22, 0.25);
     return mix(bottom, top, t);
+}
+
+fn tonemap_aces(x: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 @fragment
@@ -290,8 +335,12 @@ fn fs_main(input: FragmentInput) -> @location(0) vec4<f32> {
         }
     }
 
+    // Tone mapping (apply exposure and ACES)
+    let exposure = max(lighting.counts_pad.w, 0.0);
+    let mapped = tonemap_aces(color * max(exposure, 1e-5));
+
     // Alpha from base color a
-    return vec4<f32>(color, alpha);
+    return vec4<f32>(mapped, alpha);
 }
 
 // Simple fragment shader for models without textures

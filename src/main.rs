@@ -30,6 +30,22 @@ struct Args {
     /// Background color (hex format, e.g., #000000)
     #[arg(long, default_value = "#202020")]
     background: String,
+
+    /// Disable animation playback
+    #[arg(long)]
+    no_anim: bool,
+
+    /// Animation index (0-based)
+    #[arg(long, default_value_t = 0)]
+    anim_index: usize,
+
+    /// Animation speed multiplier
+    #[arg(long, default_value_t = 1.0)]
+    anim_speed: f32,
+
+    /// Exposure for tone mapping
+    #[arg(long, default_value_t = 1.0)]
+    exposure: f32,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -68,7 +84,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create event loop and application
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(args.model, args.background, (args.width, args.height));
+    let mut app = App::new(
+        args.model,
+        args.background,
+        (args.width, args.height),
+        !args.no_anim,
+        args.anim_index,
+        args.anim_speed,
+        args.exposure,
+    );
 
     // Run the application
     event_loop.run_app(&mut app)?;

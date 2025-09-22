@@ -122,6 +122,7 @@ pub struct ModelRenderPipeline {
     pub environment_mip_count: u32,
     pub uniforms: Uniforms,
     pub lighting_data: LightingData,
+    pub exposure: f32,
 }
 
 impl ModelRenderPipeline {
@@ -286,6 +287,17 @@ impl ModelRenderPipeline {
                         },
                         count: None,
                     },
+                    // skin matrices storage buffer (read-only), used in vertex shader
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 11,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -347,6 +359,10 @@ impl ModelRenderPipeline {
                     },
                 ],
             });
+
+        // Extend material layout with skin matrices (binding 11)
+        // NOTE: We add after existing entries so all material bind groups include a skin buffer.
+        // This buffer may be a 1-matrix identity for non-skinned meshes.
 
         // Create bind groups
         let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -509,17 +525,32 @@ impl ModelRenderPipeline {
         });
 
         // Environment resources and bind group (HDR -> IBL generation, fallback to dummy)
-        let environment = match crate::render::environment::Environment::from_hdr(
-            device,
-            queue,
-            "repo-ref/learn-wgpu-zh/docs/public/pure-sky.hdr",
-        ) {
-            Ok(env) => env,
-            Err(e) => {
-                log::warn!("Failed to generate IBL from HDR: {}. Using dummy env.", e);
-                crate::render::environment::Environment::create_dummy(device, queue)
+        // Try a few common asset locations; if none exist, fall back to dummy env.
+        let try_paths = [
+            "assets/ibl/default.hdr",
+            "assets/ibl/pisa.hdr",
+            "assets/ibl/venice_sunset_1k.hdr",
+            "assets/ibl/venice_sunset_1k.exr",
+        ];
+        let mut environment = None;
+        for p in try_paths {
+            if std::path::Path::new(p).exists() {
+                match crate::render::environment::Environment::from_hdr(device, queue, p) {
+                    Ok(env) => {
+                        log::info!("Loaded IBL HDR: {}", p);
+                        environment = Some(env);
+                        break;
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to generate IBL from {}: {}", p, e);
+                    }
+                }
             }
-        };
+        }
+        let environment = environment.unwrap_or_else(|| {
+            log::warn!("No HDR found under assets/ibl. Using dummy environment.");
+            crate::render::environment::Environment::create_dummy(device, queue)
+        });
         let environment_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("environment_bind_group"),
             layout: &environment_bind_group_layout,
@@ -551,8 +582,8 @@ impl ModelRenderPipeline {
             ],
         });
 
-        // Assume prefilter size 128 => 8 mips (1+log2(128))
-        let environment_mip_count: u32 = 8;
+        // Use actual prefilter mip count from environment
+        let environment_mip_count: u32 = environment.prefilter_mips;
 
         Self {
             pipeline_solid,
@@ -573,6 +604,7 @@ impl ModelRenderPipeline {
             environment_mip_count,
             uniforms,
             lighting_data,
+            exposure: 1.0,
         }
     }
 
@@ -617,6 +649,7 @@ impl ModelRenderPipeline {
         self.lighting_data.counts_pad[0] = count as f32;
         self.lighting_data.counts_pad[1] = output_mode as f32;
         self.lighting_data.counts_pad[2] = self.environment_mip_count as f32;
+        self.lighting_data.counts_pad[3] = self.exposure as f32;
 
         queue.write_buffer(
             &self.uniform_buffer,

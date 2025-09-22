@@ -12,16 +12,20 @@ pub struct Vertex {
     pub tangent: [f32; 4],
     pub tex_coords1: [f32; 2],
     pub color: [f32; 4],
+    pub joints: [u32; 4],
+    pub weights: [f32; 4],
 }
 
 impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+    const ATTRIBS: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x3,
         2 => Float32x2,
         3 => Float32x4,
         4 => Float32x2,
-        5 => Float32x4
+        5 => Float32x4,
+        6 => Uint32x4,
+        7 => Float32x4
     ];
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -47,6 +51,12 @@ pub struct Mesh {
     pub two_sided: bool,
     pub blend_mode: Option<asset_importer::material::BlendMode>,
     pub opaque_transparent: bool,
+    // Skinning
+    pub bone_count: u32,
+    pub bone_node_indices: Vec<usize>,
+    pub bone_offset_mats: Vec<glam::Mat4>,
+    pub skin_buffer: Option<wgpu::Buffer>,
+    pub mesh_node_index: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +83,12 @@ impl Mesh {
         two_sided: bool,
         blend_mode: Option<asset_importer::material::BlendMode>,
         opaque_transparent: bool,
+        // skinning
+        bone_count: u32,
+        bone_node_indices: Vec<usize>,
+        bone_offset_mats: Vec<glam::Mat4>,
+        skin_buffer: Option<wgpu::Buffer>,
+        mesh_node_index: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
@@ -100,6 +116,11 @@ impl Mesh {
             two_sided,
             blend_mode,
             opaque_transparent,
+            bone_count,
+            bone_node_indices,
+            bone_offset_mats,
+            skin_buffer,
+            mesh_node_index,
         })
     }
 

@@ -27,6 +27,11 @@ pub struct App {
     pub frame_time_ms: f32,
     pub orbit_target: glam::Vec3,
     pub orbit_radius: f32,
+    // animation & exposure
+    pub anim_enabled: bool,
+    pub anim_index: usize,
+    pub anim_speed: f32,
+    pub exposure: f32,
 }
 
 impl App {
@@ -34,6 +39,10 @@ impl App {
         model_path: Option<String>,
         background_hex: String,
         initial_size: (u32, u32),
+        anim_enabled: bool,
+        anim_index: usize,
+        anim_speed: f32,
+        exposure: f32,
     ) -> Self {
         Self {
             window: None,
@@ -53,6 +62,10 @@ impl App {
             frame_time_ms: 0.0,
             orbit_target: glam::Vec3::ZERO,
             orbit_radius: 5.0,
+            anim_enabled,
+            anim_index,
+            anim_speed,
+            exposure,
         }
     }
 
@@ -149,9 +162,15 @@ impl ApplicationHandler for App {
             let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
 
             // Initialize renderer and UI
-            let mut renderer =
-                pollster::block_on(Renderer::new(Arc::clone(&window), self.model_path.clone()))
-                    .unwrap();
+            let mut renderer = pollster::block_on(Renderer::new(
+                Arc::clone(&window),
+                self.model_path.clone(),
+                self.anim_enabled,
+                self.anim_index,
+                self.anim_speed,
+                self.exposure,
+            ))
+            .unwrap();
             // Apply background from CLI
             renderer.background = parse_hex_color(&self.background_hex).unwrap_or(wgpu::Color {
                 r: 0.125,
